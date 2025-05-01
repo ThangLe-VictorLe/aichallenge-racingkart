@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # docker setup
-AIC_DIR="/home/$USER/aichallenge-2024"
-VEHICLE_DIR="/home/$USER/aichallenge-2024/vehicle"
+AIC_DIR="/home/$USER/aichallenge-2025"
+VEHICLE_DIR="/home/$USER/aichallenge-2025/vehicle"
 
 AIC_CD="cd $AIC_DIR"
 VEHICLE_CD="cd $VEHICLE_DIR"

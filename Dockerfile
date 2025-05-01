@@ -31,7 +31,7 @@ FROM common AS eval
 ENV RCUTILS_COLORIZED_OUTPUT=0
 
 RUN mkdir /ws
-RUN git clone --depth 1 https://github.com/AutomotiveAIChallenge/aichallenge-2024 /ws/repository
+RUN git clone --depth 1 https://github.com/AutomotiveAIChallenge/aichallenge-2025 /ws/repository
 RUN mv /ws/repository/aichallenge /aichallenge
 RUN rm -rf /aichallenge/simulator
 RUN rm -rf /aichallenge/workspace/src/aichallenge_submit
