@@ -1,5 +1,4 @@
 #!/bin/bash
-AWSIM_DIRECTORY="/aichallenge/simulator/AWSIM"
 
 # Create a temporary file to store process IDs
 PID_FILE=$(mktemp)
@@ -143,7 +142,7 @@ sudo sysctl -w net.core.rmem_max=2147483647 >/dev/null
 
 # Start AWSIM with nohup
 echo "Start AWSIM"
-nohup $AWSIM_DIRECTORY/AWSIM.x86_64 >/dev/null &
+nohup /aichallenge/run_simulator.bash >/dev/null &
 PID_AWSIM=$!
 echo "AWSIM PID: $PID_AWSIM"
 echo "$PID_AWSIM" >"$PID_FILE"
