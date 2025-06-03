@@ -12,7 +12,10 @@ Panels:
         - /Sensing1
         - /Sensing1/GNSS1/PoseWithCovariance1
         - /Sensing1/GNSS1/PoseWithCovariance1/Covariance1
+        - /Sensing1/GNSS1/PoseWithCovariance1/Covariance1/Position1
+        - /Sensing1/GNSSLink1
         - /Localization1
+        - /Localization1/GNSS1
         - /Localization1/EKF1/PoseHistory1/Line1
         - /Localization1/EKF1/Odometry1/Shape1
         - /Planning1
@@ -50,6 +53,8 @@ Visualization Manager:
             All Enabled: false
             base_link:
               Value: true
+            gnss_base_link:
+              Value: true
             gnss_link:
               Value: true
             imu_link:
@@ -73,6 +78,8 @@ Visualization Manager:
                     {}
                   imu_link:
                     {}
+              gnss_base_link:
+                {}
               viewer:
                 {}
           Update Interval: 0.029999999329447746
@@ -221,11 +228,11 @@ Visualization Manager:
                   Frame: Local
                   Offset: 1
                   Scale: 1
-                  Value: true
+                  Value: false
                 Position:
                   Alpha: 0.6000000238418579
                   Color: 204; 51; 204
-                  Scale: 1
+                  Scale: 0.30000001192092896
                   Value: true
                 Value: true
               Enabled: true
@@ -680,7 +687,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/ThirdPersonFollower
-      Distance: 20.967723846435547
+      Distance: 17.923776626586914
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -695,10 +702,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.3653985857963562
+      Pitch: 0.8497965931892395
       Target Frame: base_link
       Value: ThirdPersonFollower (rviz_default_plugins)
-      Yaw: 3.1204020977020264
+      Yaw: 3.050400733947754
     Saved:
       - Class: rviz_default_plugins/ThirdPersonFollower
         Distance: 18
