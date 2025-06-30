@@ -180,9 +180,10 @@ PID_UPDATER=$!
 echo "$PID_UPDATER" >>"$PID_FILE"
 
 # Start recording rviz2
-echo "Start screen capture"
+echo "Check if screen capture is ready"
 until (ros2 service type /debug/service/capture_screen >/dev/null); do
     sleep 5
+    echo "Check if screen capture is not ready"
 done
 
 # Move windows
