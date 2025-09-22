@@ -19,20 +19,20 @@ zenoh:
 driver-bash:
 	docker compose run driver bash
 
-# racing kartとzenohの起動・ログ表示
-driver-zenoh:
-	docker compose up -d driver zenoh
-	docker compose logs -f driver zenoh
-
 # aicコンテナにてros2 bag record -a
 rosbag:
-	docker compose up -d rosbag
+	docker compose up -d rosbag 
 	docker compose logs -f rosbag
 
-# Autowareとracing kartとzenohの起動
+rosbag-all:
+	docker compose up -d rosbag
 run-full-system:
-	docker compose up -d autoware driver zenoh
-	docker compose logs -f autoware driver zenoh
+	docker compose up -d driver
+	docker compose up -d autoware
+	$(MAKE) rosbag-all
+	sleep 5
+	docker compose up -d zenoh
+	docker compose logs -f autoware driver zenoh 2>&1 | tee log/full_log.log | stdbuf -oL grep -E "(ERROR|WARN)"
 
 # Download submission data by asking for credentials interactively
 # Usage:
@@ -74,23 +74,18 @@ download:
 	@echo "Process finished."
 
 # autowareのbuildのみ
-build:
+build-autoware:
 	docker compose up -d aic-build
 	docker compose logs -f aic-build
 
+
+# rvizの起動・ログ表示
+rviz2:
+	docker compose stop rviz2
+	docker compose up -d rviz2
+	docker compose logs -f rviz2
+
 # ダウンロードからビルド・実行まで全て行う
-all:download-only
+all: download
 	docker compose up -d aic-build driver zenoh autoware rosbag
 	docker compose logs -f aic-build driver zenoh autoware rosbag
-#それぞれのコンテナをstopする
-stop-autoware:
-	docker compose stop autoware
-stop-zenoh:
-	docker compose stop zenoh
-stop-driver:
-	docker compose stop driver
-stop-rosbag:
-	docker compose stop rosbag
-# Stop all services
-stop-all:
-	docker compose down

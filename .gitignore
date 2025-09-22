@@ -4,3 +4,6 @@
 *.webm
 *.db3
 rosbag2*/
+*.pyc
+*pem
+vehicle/.env
