@@ -53,6 +53,26 @@ private:
 
   double accel_stddev_imu_link_;
 
+  // EMA Filter variables
+  bool use_ema_filter_;
+  double ema_alpha_; // Tune this: 0.0 to 1.0 (lower is smoother, e.g., 0.1)
+  bool ema_initialized_ = false;
+  double ema_x_ = 0.0;
+  double ema_y_ = 0.0;
+  double ema_z_ = 0.0;
+
+  // Kalman Filter variables
+  bool use_kalman_filter_;
+  double kalman_q_; // Tune this: Process noise covariance (e.g., 0.001 to 0.1)
+  double kalman_r_; // Tune this: Measurement noise covariance (e.g., 0.1 to 10.0)
+  bool kf_initialized_ = false;
+  double kf_x_ = 0.0;
+  double kf_y_ = 0.0;
+  double kf_z_ = 0.0;
+  double kf_p_x_ = 1.0;
+  double kf_p_y_ = 1.0;
+  double kf_p_z_ = 1.0;
+
   std::shared_ptr<tier4_autoware_utils::TransformListener> transform_listener_;
 
   std::string output_frame_;
