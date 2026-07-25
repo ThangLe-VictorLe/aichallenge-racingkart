@@ -2,4 +2,10 @@
     <class name="autoware_overlay_rviz_plugin/SignalDisplay" type="autoware_overlay_rviz_plugin::SignalDisplay" base_class_type="rviz_common::Display">
         <description>Signal overlay plugin for the 3D view.</description>
     </class>
+    <class name="aichallenge_rviz_plugin::SamplePanel"type="aichallenge_rviz_plugin::SamplePanel" base_class_type="rviz_common::Panel">
+        <description>Sample Panel</description>
+    </class>
+    <class name="aichallenge_rviz_plugin::GraphPanel" type="aichallenge_rviz_plugin::GraphPanel" base_class_type="rviz_common::Panel">
+        <description>Accel / Speed / Brake scrolling graph panel.</description>
+    </class>
 </library>

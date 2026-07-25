@@ -7,6 +7,7 @@ ament_auto_find_build_dependencies()
 
 set(headers_to_moc
   include/signal_display.hpp
+  include/graph_panel.hpp
 )
 
 set(headers_to_not_moc
@@ -32,6 +33,8 @@ set(display_source_files
   src/turn_signals_display.cpp
   src/traffic_display.cpp
   src/speed_limit_display.cpp
+  src/sample_panel.cpp
+  src/graph_panel.cpp
 )
 
 add_library(${PROJECT_NAME} SHARED
@@ -69,8 +72,11 @@ ament_target_dependencies(${PROJECT_NAME} PUBLIC
   rviz_common
   rviz_rendering
   autoware_auto_vehicle_msgs
+  autoware_auto_control_msgs
   tier4_planning_msgs
+  tier4_vehicle_msgs
   autoware_perception_msgs
+  std_msgs
 )
 
 ament_export_include_directories(include)
