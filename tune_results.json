@@ -1,0 +1,373 @@
+{
+  "timestamp": "2026-07-24T19:30:25.333859",
+  "baseline_avg_lap_time": 47.05584716796875,
+  "best_avg_lap_time": 46.00812339782715,
+  "improvement_seconds": 1.048,
+  "total_trials": 53,
+  "trial_log": [
+    {
+      "param": "N",
+      "direction": "+10%",
+      "value": 22,
+      "time": 46.87080764770508,
+      "result": "improved"
+    },
+    {
+      "param": "N",
+      "direction": "+10%",
+      "value": 24,
+      "time": 46.75078201293945,
+      "result": "improved"
+    },
+    {
+      "param": "N",
+      "direction": "+10%",
+      "value": 26,
+      "time": 46.83580017089844,
+      "result": "reverted"
+    },
+    {
+      "param": "R[0] v-cost",
+      "direction": "+10%",
+      "value": 110000.00000000001,
+      "time": 46.61825370788574,
+      "result": "improved"
+    },
+    {
+      "param": "R[0] v-cost",
+      "direction": "+10%",
+      "value": 121000.00000000003,
+      "time": 47.13836479187012,
+      "result": "reverted"
+    },
+    {
+      "param": "R[1] delta-cost",
+      "direction": "+10%",
+      "value": 110000.00000000001,
+      "time": 46.908315658569336,
+      "result": "reverted"
+    },
+    {
+      "param": "R[1] delta-cost",
+      "direction": "-10%",
+      "value": 90000.0,
+      "time": 47.05334663391113,
+      "result": "reverted"
+    },
+    {
+      "param": "delta_max_deg",
+      "direction": "+10%",
+      "value": 35.2,
+      "time": 46.525733947753906,
+      "result": "improved"
+    },
+    {
+      "param": "delta_max_deg",
+      "direction": "+10%",
+      "value": 38.720000000000006,
+      "time": 47.16086959838867,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_rate_max",
+      "direction": "+10%",
+      "value": 1.6500000000000001,
+      "time": 46.73827934265137,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_rate_max",
+      "direction": "-10%",
+      "value": 1.35,
+      "time": 47.01333808898926,
+      "result": "reverted"
+    },
+    {
+      "param": "control_rate",
+      "direction": "+10%",
+      "value": 44.0,
+      "time": 46.65326118469238,
+      "result": "reverted"
+    },
+    {
+      "param": "control_rate",
+      "direction": "-10%",
+      "value": 36.0,
+      "time": 46.695770263671875,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_tire_gain",
+      "direction": "+10%",
+      "value": 2.09,
+      "time": 67.38510513305664,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_tire_gain",
+      "direction": "-10%",
+      "value": 1.71,
+      "time": 47.32090377807617,
+      "result": "reverted"
+    },
+    {
+      "param": "accel_lp_gain",
+      "direction": "-10%",
+      "value": 0.9,
+      "time": 46.52073287963867,
+      "result": "improved"
+    },
+    {
+      "param": "accel_lp_gain",
+      "direction": "-10%",
+      "value": 0.81,
+      "time": 46.8883113861084,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_lp_gain",
+      "direction": "-10%",
+      "value": 0.9,
+      "time": 47.34340858459473,
+      "result": "reverted"
+    },
+    {
+      "param": "wp_id_offset",
+      "direction": "+10%",
+      "value": 3,
+      "time": Infinity,
+      "result": "reverted"
+    },
+    {
+      "param": "wp_id_offset",
+      "direction": "-10%",
+      "value": 1,
+      "time": 47.32840538024902,
+      "result": "reverted"
+    },
+    {
+      "param": "ay_max",
+      "direction": "+10%",
+      "value": 16.5,
+      "time": 46.260677337646484,
+      "result": "improved"
+    },
+    {
+      "param": "ay_max",
+      "direction": "+10%",
+      "value": 18.150000000000002,
+      "time": 46.15065383911133,
+      "result": "improved"
+    },
+    {
+      "param": "ay_max",
+      "direction": "+10%",
+      "value": 19.965000000000003,
+      "time": 46.47572326660156,
+      "result": "reverted"
+    },
+    {
+      "param": "Q[0] e_y",
+      "direction": "+10%",
+      "value": 660000.0,
+      "time": 46.14815330505371,
+      "result": "improved"
+    },
+    {
+      "param": "Q[0] e_y",
+      "direction": "+10%",
+      "value": 726000.0000000001,
+      "time": 47.0483455657959,
+      "result": "reverted"
+    },
+    {
+      "param": "Q[1] e_psi",
+      "direction": "+10%",
+      "value": 88000000.0,
+      "time": 46.06063461303711,
+      "result": "improved"
+    },
+    {
+      "param": "Q[1] e_psi",
+      "direction": "+10%",
+      "value": 96800000.00000001,
+      "time": 46.22817039489746,
+      "result": "reverted"
+    },
+    {
+      "param": "Q[2] t",
+      "direction": "+10%",
+      "value": 2200000.0,
+      "time": 46.020626068115234,
+      "result": "improved"
+    },
+    {
+      "param": "Q[2] t",
+      "direction": "+10%",
+      "value": 2420000.0,
+      "time": 46.970829010009766,
+      "result": "reverted"
+    },
+    {
+      "param": "QN[0]",
+      "direction": "+10%",
+      "value": 1100000.0,
+      "time": 46.34569549560547,
+      "result": "reverted"
+    },
+    {
+      "param": "QN[0]",
+      "direction": "-10%",
+      "value": 900000.0,
+      "time": 50.06398963928223,
+      "result": "reverted"
+    },
+    {
+      "param": "QN[1]",
+      "direction": "+10%",
+      "value": 1100000.0,
+      "time": 46.64575958251953,
+      "result": "reverted"
+    },
+    {
+      "param": "QN[1]",
+      "direction": "-10%",
+      "value": 900000.0,
+      "time": 46.38820457458496,
+      "result": "reverted"
+    },
+    {
+      "param": "QN[2]",
+      "direction": "+10%",
+      "value": 11000.0,
+      "time": 46.5832462310791,
+      "result": "reverted"
+    },
+    {
+      "param": "N",
+      "direction": "+10%",
+      "value": 26,
+      "time": 46.35569763183594,
+      "result": "reverted"
+    },
+    {
+      "param": "N",
+      "direction": "-10%",
+      "value": 22,
+      "time": 46.59574890136719,
+      "result": "reverted"
+    },
+    {
+      "param": "R[0] v-cost",
+      "direction": "+10%",
+      "value": 121000.00000000003,
+      "time": 46.153154373168945,
+      "result": "reverted"
+    },
+    {
+      "param": "R[0] v-cost",
+      "direction": "-10%",
+      "value": 99000.00000000001,
+      "time": 46.76078414916992,
+      "result": "reverted"
+    },
+    {
+      "param": "R[1] delta-cost",
+      "direction": "+10%",
+      "value": 110000.00000000001,
+      "time": 46.00812339782715,
+      "result": "improved"
+    },
+    {
+      "param": "R[1] delta-cost",
+      "direction": "+10%",
+      "value": 121000.00000000003,
+      "time": 46.15565490722656,
+      "result": "reverted"
+    },
+    {
+      "param": "delta_max_deg",
+      "direction": "+10%",
+      "value": 38.720000000000006,
+      "time": 46.05313301086426,
+      "result": "reverted"
+    },
+    {
+      "param": "delta_max_deg",
+      "direction": "-10%",
+      "value": 31.680000000000003,
+      "time": 46.28318214416504,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_rate_max",
+      "direction": "+10%",
+      "value": 1.6500000000000001,
+      "time": 46.285682678222656,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_rate_max",
+      "direction": "-10%",
+      "value": 1.35,
+      "time": 46.30318641662598,
+      "result": "reverted"
+    },
+    {
+      "param": "control_rate",
+      "direction": "+10%",
+      "value": 44.0,
+      "time": 46.03312873840332,
+      "result": "reverted"
+    },
+    {
+      "param": "control_rate",
+      "direction": "-10%",
+      "value": 36.0,
+      "time": 46.695770263671875,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_tire_gain",
+      "direction": "+10%",
+      "value": 2.09,
+      "time": 58.290666580200195,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_tire_gain",
+      "direction": "-10%",
+      "value": 1.71,
+      "time": 46.76078414916992,
+      "result": "reverted"
+    },
+    {
+      "param": "accel_lp_gain",
+      "direction": "+10%",
+      "value": 0.9900000000000001,
+      "time": 46.52823448181152,
+      "result": "reverted"
+    },
+    {
+      "param": "accel_lp_gain",
+      "direction": "-10%",
+      "value": 0.81,
+      "time": 46.39820671081543,
+      "result": "reverted"
+    },
+    {
+      "param": "steer_lp_gain",
+      "direction": "-10%",
+      "value": 0.9,
+      "time": 46.90581512451172,
+      "result": "reverted"
+    },
+    {
+      "param": "wp_id_offset",
+      "direction": "+10%",
+      "value": 3,
+      "time": 76.9373550415039,
+      "result": "reverted"
+    }
+  ]
+}

@@ -75,7 +75,7 @@ ImuCorrector::ImuCorrector(const rclcpp::NodeOptions & node_options)
   accel_stddev_imu_link_ = declare_parameter<double>("acceleration_stddev", 10000.0);
 
   // EMA filter parameters
-  use_ema_filter_ = declare_parameter<bool>("use_ema_filter", true);
+  use_ema_filter_ = declare_parameter<bool>("use_ema_filter", false);
   ema_alpha_ = declare_parameter<double>("ema_alpha", 0.1); // Tune this: 0.0 to 1.0 (lower is smoother)
 
   // Kalman filter parameters

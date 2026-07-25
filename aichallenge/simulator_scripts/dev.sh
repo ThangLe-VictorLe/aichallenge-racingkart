@@ -8,7 +8,7 @@ vehicles="${1:-1}"
 
 exec $AWSIM_DIRECTORY/AWSIM.x86_64 \
     --start-mode count \
-    --start-count-seconds 5 \
+    --start-count-seconds 1 \
     --vehicles "${vehicles}" \
     --npcs 0 \
     --boosts 2 \
@@ -22,6 +22,7 @@ exec $AWSIM_DIRECTORY/AWSIM.x86_64 \
     --ranking off \
     --camera off \
     --lidar off
+    # -batchmode -nographics
 
 # Cameraを使う場合 : --camera cpu or gpu
 # LiDARを使う場合 : --lidar cpu or gpu

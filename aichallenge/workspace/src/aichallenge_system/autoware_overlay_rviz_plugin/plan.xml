@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plan>
+    <goal>Create an Accel/Speed/Brake Graph Panel in RViz</goal>
+    
+    <structure>
+        <rviz_panel>
+            <class_name>GraphPanel</class_name>
+            <namespace>aichallenge_rviz_plugin</namespace>
+            <base_class>rviz_common::Panel</base_class>
+            <ui_framework>Qt5 (QChartView, QChart, QLineSeries)</ui_framework>
+        </rviz_panel>
+        <registration>
+            <macro>PLUGINLIB_EXPORT_CLASS(aichallenge_rviz_plugin::GraphPanel, rviz_common::Panel)</macro>
+            <xml_file>plugins_description.xml</xml_file>
+        </registration>
+        <cmake>
+            <find_package>Qt5 COMPONENTS Charts REQUIRED</find_package>
+            <link_libraries>Qt5::Charts</link_libraries>
+            <add_source>src/graph_panel.cpp</add_source>
+            <add_header>include/graph_panel.hpp (to be moc'ed)</add_header>
+        </cmake>
+    </structure>
+
+    <data_sources>
+        <topic name="/vehicle/status/velocity_status" type="autoware_auto_vehicle_msgs::msg::VelocityReport">
+            <field>longitudinal_velocity (m/s)</field>
+            <description>Used to plot the speed of the vehicle.</description>
+        </topic>
+        <topic name="/control/command/actuation_cmd" type="tier4_vehicle_msgs::msg::ActuationCommandStamped">
+            <field>actuation.accel_cmd (0.0 to 1.0+)</field>
+            <field>actuation.brake_cmd (0.0 to 1.0+)</field>
+            <description>Used to plot the acceleration and braking commands.</description>
+        </topic>
+    </data_sources>
+
+    <implementation_steps>
+        <step id="1" name="Create Header File">
+            <file>include/graph_panel.hpp</file>
+            <description>Declare the GraphPanel class inheriting from rviz_common::Panel. Add Qt macro Q_OBJECT. Declare ROS 2 node, subscriptions, and QChart/QLineSeries pointers.</description>
+        </step>
+        <step id="2" name="Create Source File">
+            <file>src/graph_panel.cpp</file>
+            <description>Implement the constructor to set up QChartView and add it to a QVBoxLayout. Override onInitialize() to get the rviz_common::DisplayContext's ROS node and initialize subscriptions.</description>
+        </step>
+        <step id="3" name="Implement Data Handling">
+            <description>In the subscription callbacks, append the new values (speed, accel, brake) with timestamps to their respective QLineSeries. Ensure the x-axis scrolls or scales dynamically with time.</description>
+        </step>
+        <step id="4" name="Update CMakeLists.txt">
+            <file>CMakeLists.txt</file>
+            <description>Add graph_panel.hpp to headers_to_moc, add graph_panel.cpp to display_source_files, and link Qt5::Charts.</description>
+        </step>
+        <step id="5" name="Update Plugins Description">
+            <file>plugins_description.xml</file>
+            <description>Add the new GraphPanel class to allow RViz to discover it.</description>
+        </step>
+    </implementation_steps>
+</plan>
