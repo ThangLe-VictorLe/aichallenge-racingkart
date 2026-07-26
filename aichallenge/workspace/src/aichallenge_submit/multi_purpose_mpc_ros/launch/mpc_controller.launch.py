@@ -30,6 +30,12 @@ def launch_setup(context, *args, **kwargs):
         / "ref_vel.yaml"
     )
 
+    steer_gain_path = (
+        Path(get_package_share_directory("multi_purpose_mpc_ros"))
+        / "config"
+        / "steer_gain.yaml"
+    )
+
     mpc_controller = Node(
         package="multi_purpose_mpc_ros",
         executable="run_mpc_controller.bash",
@@ -42,6 +48,8 @@ def launch_setup(context, *args, **kwargs):
             str(config_path),
             "--ref_vel_path",
             str(ref_vel_path),
+            "--steer_gain_path",
+            str(steer_gain_path),
             "--ros-args",
             "--log-level",
             "info",

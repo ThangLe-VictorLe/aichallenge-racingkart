@@ -80,6 +80,10 @@ class MPC:
     def update_QN(self, QN: np.ndarray):
         self.QN = QN
 
+    def update_max_steering_rate(self, max_steering_rate: float):
+        self.max_steering_rate = max_steering_rate
+
+
     def _init_problem(self, N, safety_margin):
         """
         Initialize optimization problem for current time step with steering rate constraints.
