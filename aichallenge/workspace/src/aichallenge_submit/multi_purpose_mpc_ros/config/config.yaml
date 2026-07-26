@@ -36,20 +36,20 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.50   # +safety margin
+  width: 1.0   # artificially squeezed to force strict tracking
 
 mpc:
   N: 24
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [0.0, 100000.0]
+  R: [0.0, 0.0]
   a_min: -3.4 # m/s^2
   a_max: 2.8 # m/s^2
   delta_max_deg: 32.0 # degrees
   steer_rate_max: 1.4 # rad/s
   control_rate: 40.0 # Hz
-  steering_tire_angle_gain_var: 1.7
+  steering_tire_angle_gain_var: 1.4
   # steering_tire_angle_gain_var: 1.0
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
