@@ -33,6 +33,7 @@ install(PROGRAMS
   scripts/run_mpc_simulation.bash
   scripts/run_reference_path_visualizer.bash
   scripts/run_reference_velocity_configulator.bash
+  scripts/run_steer_gain_configurator.bash
   scripts/path_constraints_provider.bash
   scripts/mpc_controller
   scripts/mpc_simulation
@@ -42,6 +43,9 @@ install(PROGRAMS
   scripts/publish_initialpose_gnss
   scripts/reference_path_visualizer
   scripts/reference_velocity_configulator
+  scripts/steer_gain_configurator
+  scripts/generate_5wp_configs.py
+  scripts/plot_track_waypoints.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

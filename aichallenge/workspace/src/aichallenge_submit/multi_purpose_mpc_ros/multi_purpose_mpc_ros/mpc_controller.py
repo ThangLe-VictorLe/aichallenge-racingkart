@@ -50,6 +50,7 @@ from multi_purpose_mpc_ros.obstacle_manager import ObstacleManager
 from multi_purpose_mpc_ros.exexution_stats import ExecutionStats
 from multi_purpose_mpc_ros_msgs.msg import AckermannControlBoostCommand, PathConstraints, BorderCells
 from multi_purpose_mpc_ros.tools.reference_velocity_configulator import ReferenceVelocityConfigulator
+from multi_purpose_mpc_ros.tools.steer_gain_configurator import SteerGainConfigurator
 
 
 RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
@@ -127,7 +128,7 @@ class MPCController(Node):
 
     KP = 100.0
 
-    def __init__(self, config_path: str, ref_vel_config_path: Optional[str]) -> None:
+    def __init__(self, config_path: str, ref_vel_config_path: Optional[str] = None, steer_gain_config_path: Optional[str] = None) -> None:
         super().__init__("mpc_controller") # type: ignore
 
         # declare parameters
@@ -143,6 +144,7 @@ class MPCController(Node):
 
         self._config_path = config_path
         self._ref_vel_config_path: Optional[str] = ref_vel_config_path
+        self._steer_gain_config_path: Optional[str] = steer_gain_config_path
         self._cfg = self._load_config()
         self._odom: Optional[Odometry] = None
         self._enable_control = True
@@ -181,6 +183,15 @@ class MPCController(Node):
                     "\n" +
                     "----- ref_vel.yaml -----\n"+
                     ref_vel_config_content + "\n" +
+                    "-----------------------")
+
+        if self._steer_gain_config_path is not None:
+            with open(self._steer_gain_config_path, "r") as f:
+                steer_gain_config_content = f.read()
+                self.get_logger().info(
+                    "\n" +
+                    "----- steer_gain.yaml -----\n"+
+                    steer_gain_config_content + "\n" +
                     "-----------------------")
 
         with open(self._config_path, "r") as f:
@@ -433,6 +444,11 @@ class MPCController(Node):
                 return None
             return ReferenceVelocityConfigulator(self, self._config_path, self._ref_vel_config_path)
 
+        def create_steer_gain_configurator() -> Optional[SteerGainConfigurator]:
+            if self._steer_gain_config_path is None:
+                return None
+            return SteerGainConfigurator(self, self._config_path, self._steer_gain_config_path)
+
         self._map = create_map()
         self._reference_path = create_ref_path(self._map)
         self._car = create_car(self._reference_path)
@@ -440,6 +456,7 @@ class MPCController(Node):
         compute_speed_profile(self._car, self._mpc_cfg)
 
         self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = create_ref_vel_configulator()
+        self._steer_gain_configurator: Optional[SteerGainConfigurator] = create_steer_gain_configurator()
 
         self._trajectory: Optional[Trajectory] = None
         self._path_constraints = None
@@ -802,6 +819,12 @@ class MPCController(Node):
         self._car.update_states(pose.x, pose.y, pose.theta)
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
+
+        if self._steer_gain_configurator is not None:
+            current_gain = self._steer_gain_configurator.get_steer_gain(self._mpc.model.wp_id, interpolate=True)
+            self._mpc_cfg.steering_tire_angle_gain_var = current_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / current_gain
+            self._mpc.update_max_steering_rate(scaled_steer_rate_max)
 
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()

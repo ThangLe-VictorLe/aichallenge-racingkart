@@ -36,7 +36,7 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.0   # artificially squeezed to force strict tracking
+  width: 1.5   # artificially squeezed to force strict tracking
 
 mpc:
   N: 24
@@ -45,7 +45,7 @@ mpc:
   # QN: [e_y, e_psi, t]
   R: [0.0, 0.0]
   a_min: -3.4 # m/s^2
-  a_max: 2.8 # m/s^2
+  a_max: 3.0 # m/s^2
   delta_max_deg: 32.0 # degrees
   steer_rate_max: 1.4 # rad/s
   control_rate: 40.0 # Hz
