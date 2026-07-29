@@ -24,4 +24,10 @@ def load_ref_path(csv_file_path: str):
     y = df['y_m'].tolist()
     psi = df['psi_rad'].tolist()
     kappa = df['kappa_radpm'].tolist()
-    return x, y, psi, kappa
+    
+    if 'vx_mps' in df.columns:
+        vx = df['vx_mps'].tolist()
+    else:
+        vx = [30.0] * len(x)
+        
+    return x, y, psi, kappa, vx

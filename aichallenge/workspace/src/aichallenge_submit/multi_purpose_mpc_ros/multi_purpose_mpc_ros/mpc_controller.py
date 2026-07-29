@@ -112,6 +112,8 @@ class MPCConfig:
     steer_low_pass_gain: float
     wp_id_offset: int
     use_max_kappa_pred: bool
+    use_csv_velocity: bool
+    use_dynamic_steer_gain: bool
 
 
 class MPCController(Node):
@@ -339,11 +341,12 @@ class MPCController(Node):
             is_ref_path_given = cfg_ref_path.csv_path != "" # type: ignore
             if is_ref_path_given:
                 print("Using given reference path")
-                wp_x, wp_y, _, _ = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
+                wp_x, wp_y, _, _, wp_v = load_ref_path(self.in_pkg_share(self._cfg.reference_path.csv_path)) # type: ignore
                 return ReferencePath(
                     map,
                     wp_x,
                     wp_y,
+                    wp_v,
                     cfg_ref_path.resolution,
                     cfg_ref_path.smoothing_distance,
                     cfg_ref_path.max_width,
@@ -352,11 +355,13 @@ class MPCController(Node):
             else:
                 print("Using waypoints to create reference path")
                 wp_x, wp_y = load_waypoints(self.in_pkg_share(self._cfg.waypoints.csv_path)) # type: ignore
+                wp_v = [30.0] * len(wp_x)
 
                 return ReferencePath(
                     map,
                     wp_x,
                     wp_y,
+                    wp_v,
                     cfg_ref_path.resolution,
                     cfg_ref_path.smoothing_distance,
                     cfg_ref_path.max_width,
@@ -403,7 +408,9 @@ class MPCController(Node):
                 cfg_mpc.accel_low_pass_gain,
                 cfg_mpc.steer_low_pass_gain,
                 cfg_mpc.wp_id_offset,
-                cfg_mpc.use_max_kappa_pred)
+                cfg_mpc.use_max_kappa_pred,
+                cfg_mpc.use_csv_velocity,
+                cfg_mpc.use_dynamic_steer_gain)
 
             state_constraints = {
                 "xmin": np.array([-np.inf, -np.inf, -np.inf]),
@@ -455,8 +462,17 @@ class MPCController(Node):
         self._mpc_cfg, self._mpc = create_mpc(self._car)
         compute_speed_profile(self._car, self._mpc_cfg)
 
-        self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = create_ref_vel_configulator()
-        self._steer_gain_configurator: Optional[SteerGainConfigurator] = create_steer_gain_configurator()
+        if self._mpc_cfg.use_csv_velocity:
+            self.get_logger().info("Using CSV vx_mps for velocity (ReferenceVelocityConfigulator disabled)")
+            self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = None
+        else:
+            self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = create_ref_vel_configulator()
+
+        if self._mpc_cfg.use_dynamic_steer_gain:
+            self._steer_gain_configurator: Optional[SteerGainConfigurator] = create_steer_gain_configurator()
+        else:
+            self.get_logger().info("Using fixed steer gain from config (SteerGainConfigurator disabled)")
+            self._steer_gain_configurator: Optional[SteerGainConfigurator] = None
 
         self._trajectory: Optional[Trajectory] = None
         self._path_constraints = None
@@ -830,14 +846,22 @@ class MPCController(Node):
             u, max_delta = self._mpc.get_control()
             # self.get_logger().info(f"u: {u}")
 
-        if self._ref_vel_configulator is not None:
-            ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
-            ref_vel_kmph = min(
-                kmh_to_m_per_sec(ref_vel_mps),
-                self._mpc_cfg.v_max)
+        if self._mpc_cfg.use_csv_velocity:
+            # We use the interpolated vx_mps from the CSV (stored in wp.v_ref)
+            current_wp = self._reference_path.waypoints[self._mpc.model.wp_id]
+            ref_vel_kmph = min(current_wp.v_ref * 3.6, self._mpc_cfg.v_max) # m/s to km/h
             self._mpc.update_v_max(ref_vel_kmph)
-            v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
-            self._reference_path.set_v_ref(v_ref)
+            # Note: We do NOT call set_v_ref to overwrite the whole path.
+            # This allows the MPC to look ahead at the varying velocities in the CSV!
+        else:
+            if self._ref_vel_configulator is not None:
+                ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
+                ref_vel_kmph = min(
+                    kmh_to_m_per_sec(ref_vel_mps),
+                    self._mpc_cfg.v_max)
+                self._mpc.update_v_max(ref_vel_kmph)
+                v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
+                self._reference_path.set_v_ref(v_ref)
 
         # override by brake command if control is disabled
         if not self._enable_control:

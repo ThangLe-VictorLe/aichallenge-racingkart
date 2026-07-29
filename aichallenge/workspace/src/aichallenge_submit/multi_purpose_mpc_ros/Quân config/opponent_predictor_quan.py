@@ -44,19 +44,34 @@ class OpponentPredictor(Node):
         # Map and reference path
         self._map = Map(self.in_pkg_share(self._cfg.map.yaml_path)) # type: ignore
         cfg_ref_path = self._cfg.reference_path # type: ignore
-        if cfg_ref_path.csv_path != "":
-            wp_x, wp_y, _, _ = load_ref_path(self.in_pkg_share(cfg_ref_path.csv_path))
+        cfg_waypoints = self._cfg.waypoints # type: ignore
+        
+        is_ref_path_given = cfg_ref_path.csv_path != ""
+        if is_ref_path_given:
+            self.get_logger().info("Using given reference path")
+            wp_x, wp_y, _, _, wp_v = load_ref_path(self.in_pkg_share(cfg_ref_path.csv_path))
+            self._reference_path = ReferencePath(
+                self._map,
+                wp_x,
+                wp_y,
+                wp_v,
+                cfg_ref_path.resolution,
+                cfg_ref_path.smoothing_distance,
+                cfg_ref_path.max_width,
+                cfg_ref_path.circular)
         else:
-            wp_x, wp_y = load_waypoints(self.in_pkg_share(self._cfg.waypoints.csv_path)) # type: ignore
-
-        self._reference_path = ReferencePath(
-            self._map,
-            wp_x,
-            wp_y,
-            cfg_ref_path.resolution,
-            cfg_ref_path.smoothing_distance,
-            cfg_ref_path.max_width,
-            cfg_ref_path.circular)
+            self.get_logger().info("Using waypoints to create reference path")
+            wp_x, wp_y = load_waypoints(self.in_pkg_share(cfg_waypoints.csv_path))
+            wp_v = [30.0] * len(wp_x)
+            self._reference_path = ReferencePath(
+                self._map,
+                wp_x,
+                wp_y,
+                wp_v,
+                cfg_ref_path.resolution,
+                cfg_ref_path.smoothing_distance,
+                cfg_ref_path.max_width,
+                cfg_ref_path.circular)
 
         # Player state
         self._player_x: Optional[float] = None
