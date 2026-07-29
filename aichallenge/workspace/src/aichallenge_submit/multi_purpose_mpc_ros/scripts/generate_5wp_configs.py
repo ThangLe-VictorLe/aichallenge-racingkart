@@ -183,59 +183,31 @@ def generate_default_configs(config_dir: str, step: int = 5, max_wp: int = 498):
     """Generates standard default 5-wp steer_gain.yaml and ref_vel.yaml if needed."""
     # Default ref_vel map
     def get_default_vel(wp_id):
-        if wp_id < 80:
-            return 50.0
-        elif wp_id < 110:
-            return 25.0
-        elif wp_id < 150:
+        if wp_id < 100:
             return 30.0
-        elif wp_id < 175:
-            return 25.0
-        elif wp_id < 235:
-            return 50.0
-        elif wp_id < 260:
-            return 25.0
-        elif wp_id < 305:
+        elif wp_id < 155:
+            return 22.0
+        elif wp_id < 190:
             return 30.0
-        elif wp_id < 325:
-            return 25.0
-        elif wp_id < 345:
+        elif wp_id < 265:
+            return 22.0
+        elif wp_id < 290:
             return 30.0
-        elif wp_id < 395:
+        elif wp_id < 320:
             return 25.0
-        elif wp_id < 415:
-            return 30.0
-        elif wp_id < 435:
-            return 25.0
-        elif wp_id < 455:
-            return 30.0
         else:
-            return 25.0
+            return 30.0
 
     # Default steer_gain map
     def get_default_gain(wp_id):
-        if wp_id < 85:
-            return 1.0
-        elif wp_id < 110:
-            return 2.0
-        elif wp_id < 160:
-            return 1.0
-        elif wp_id < 175:
-            return 2.0
-        elif wp_id < 240:
-            return 1.0
-        elif wp_id < 265:
-            return 2.0
-        elif wp_id < 305:
-            return 1.0
-        elif wp_id < 395:
-            return 2.0
-        elif wp_id < 415:
-            return 1.0
-        elif wp_id < 485:
-            return 2.0
+        if 20 < wp_id < 60:
+            return 0.9
+        elif 85 < wp_id < 105:
+            return 0.9
+        elif 130 < wp_id < 150:
+            return 0.9
         else:
-            return 1.0
+            return 1.9
 
     # ref_vel
     ref_vel_dict = {"ref_vel_configulator": {}}
@@ -301,7 +273,20 @@ def main():
     # Auto-generate 2D track map image
     try:
         from plot_track_waypoints import plot_track_waypoints
-        csv_path = os.path.join(pkg_dir, "env", "final_ver3", "mintime2.csv")
+        # Read the reference path dynamically from config.yaml
+        config_yaml_path = os.path.join(config_dir, "config.yaml")
+        csv_path = None
+        try:
+            with open(config_yaml_path, 'r') as f:
+                cfg_data = __import__("yaml").safe_load(f)
+                csv_path_rel = cfg_data.get("reference_path", {}).get("csv_path", "")
+                if csv_path_rel:
+                    csv_path = os.path.join(pkg_dir, csv_path_rel)
+        except Exception:
+            pass
+        if not csv_path or not os.path.exists(csv_path):
+            csv_path = os.path.join(pkg_dir, "env", "final_ver3", "mintime2.csv") # fallback
+            
         steer_gain_path = os.path.join(config_dir, "steer_gain.yaml")
         ref_vel_path = os.path.join(config_dir, "ref_vel.yaml")
         output_png = os.path.join(config_dir, "track_waypoint_map.png")

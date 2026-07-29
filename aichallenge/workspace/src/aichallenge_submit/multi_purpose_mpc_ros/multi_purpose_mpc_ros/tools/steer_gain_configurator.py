@@ -86,19 +86,26 @@ class SteerGainConfigurator:
             return {}
 
     def get_ref_vel(self, wp_id: int) -> float:
-        if not self._ref_vel_map:
-            return 30.0
-        sorted_keys = sorted(self._ref_vel_map.keys())
-        for i in range(len(sorted_keys)):
-            start = sorted_keys[i]
-            end = sorted_keys[(i + 1) % len(sorted_keys)]
-            if start <= end:
-                if start <= wp_id < end:
-                    return self._ref_vel_map[start]
-            else:
-                if wp_id >= start or wp_id < end:
-                    return self._ref_vel_map[start]
-        return list(self._ref_vel_map.values())[0]
+        # Check if the node is using CSV velocity or YAML velocity
+        if hasattr(self._node, '_mpc_cfg') and getattr(self._node._mpc_cfg, 'use_csv_velocity', False):
+            try:
+                return float(self._reference_path.waypoints[wp_id].v_ref * 3.6)
+            except IndexError:
+                return 30.0
+        else:
+            if not self._ref_vel_map:
+                return 30.0
+            sorted_keys = sorted(self._ref_vel_map.keys())
+            for i in range(len(sorted_keys)):
+                start = sorted_keys[i]
+                end = sorted_keys[(i + 1) % len(sorted_keys)]
+                if start <= end:
+                    if start <= wp_id < end:
+                        return self._ref_vel_map[start]
+                else:
+                    if wp_id >= start or wp_id < end:
+                        return self._ref_vel_map[start]
+            return list(self._ref_vel_map.values())[0]
 
     def _register_params(self):
         def declare_parameters():

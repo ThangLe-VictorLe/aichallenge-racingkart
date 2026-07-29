@@ -142,10 +142,24 @@ def main():
     args = parser.parse_args()
 
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    csv_path = args.csv or os.path.join(pkg_dir, "env", "final_ver3", "mintime2.csv")
-    steer_gain_path = args.steer_gain or os.path.join(pkg_dir, "config", "steer_gain.yaml")
-    ref_vel_path = args.ref_vel or os.path.join(pkg_dir, "config", "ref_vel.yaml")
-    output_png = args.output or os.path.join(pkg_dir, "config", "track_waypoint_map.png")
+    config_dir = os.path.join(pkg_dir, "config")
+    steer_gain_path = args.steer_gain or os.path.join(config_dir, "steer_gain.yaml")
+
+    config_yaml_path = os.path.join(config_dir, "config.yaml")
+    default_csv = None
+    try:
+        with open(config_yaml_path, 'r') as f:
+            cfg_data = yaml.safe_load(f)
+            csv_path_rel = cfg_data.get("reference_path", {}).get("csv_path", "")
+            if csv_path_rel:
+                default_csv = os.path.join(pkg_dir, csv_path_rel)
+    except Exception:
+        pass
+    if not default_csv or not os.path.exists(default_csv):
+        default_csv = os.path.join(pkg_dir, "env", "final_ver3", "traj_mincurv.csv")
+    csv_path = args.csv or default_csv
+    ref_vel_path = args.ref_vel or os.path.join(config_dir, "ref_vel.yaml")
+    output_png = args.output or os.path.join(config_dir, "track_waypoint_map.png")
 
     plot_track_waypoints(csv_path, steer_gain_path, ref_vel_path, output_png, step=args.step)
 

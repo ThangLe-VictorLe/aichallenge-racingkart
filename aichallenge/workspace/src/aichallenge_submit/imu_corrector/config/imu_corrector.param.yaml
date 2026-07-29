@@ -6,3 +6,10 @@
     angular_velocity_stddev_xx: 0.03   # [rad/s]
     angular_velocity_stddev_yy: 0.03   # [rad/s]
     angular_velocity_stddev_zz: 0.03   # [rad/s]
+# --- EMA Filter Settings ---
+    use_ema_filter: true
+    ema_alpha: 0.4          # Tune this: 0.0 to 1.0 (lower is smoother)
+    # --- Kalman Filter Settings ---
+    use_kalman_filter: false
+    kalman_q: 0.01          # Process noise covariance
+    kalman_r: 0.1           # Measurement noise covariance
