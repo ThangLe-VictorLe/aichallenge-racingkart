@@ -29,11 +29,11 @@ import os
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DEFAULT_INPUT  = os.path.join(SCRIPT_DIR, "raceline_mintime2.csv")
+DEFAULT_INPUT  = os.path.join(SCRIPT_DIR, "raceline_mincurv_edit.csv")
 DEFAULT_OUTPUT = os.path.join(
     SCRIPT_DIR,
     "../../../aichallenge_submit/multi_purpose_mpc_ros/env/final_ver3/"
-    "mintime2.csv"
+    "mincurv_edit.csv"
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

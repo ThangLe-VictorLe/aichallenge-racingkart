@@ -516,6 +516,30 @@ class MPCController(Node):
         # stats
         self._stats = ExecutionStats(self.get_logger(), window_size=50, record_count_threshold=1000)
 
+        # Recovery state machine initialization
+        recovery_cfg = getattr(self._cfg, 'recovery', None)
+        if recovery_cfg is not None:
+            self._recovery_enabled = bool(getattr(recovery_cfg, 'enable', True))
+            self._recovery_stuck_vel_threshold = float(getattr(recovery_cfg, 'stuck_vel_threshold_kmh', 0.5)) / 3.6
+            self._recovery_stuck_time_sec = float(getattr(recovery_cfg, 'stuck_time_sec', 1.0))
+            self._recovery_reverse_vel = float(getattr(recovery_cfg, 'reverse_vel_kmh', -5.0)) / 3.6
+            self._recovery_reverse_time_sec = float(getattr(recovery_cfg, 'reverse_time_sec', 1.5))
+            self._recovery_steer_gain = float(getattr(recovery_cfg, 'recovery_steer_gain', 1.0))
+            self._recovery_cooldown_sec = float(getattr(recovery_cfg, 'cooldown_sec', 2.0))
+        else:
+            self._recovery_enabled = True
+            self._recovery_stuck_vel_threshold = 0.5 / 3.6
+            self._recovery_stuck_time_sec = 1.0
+            self._recovery_reverse_vel = -5.0 / 3.6
+            self._recovery_reverse_time_sec = 1.5
+            self._recovery_steer_gain = 1.0
+            self._recovery_cooldown_sec = 2.0
+
+        self._recovery_state = "NORMAL"
+        self._stuck_start_time = None
+        self._recovering_start_time = None
+        self._cooldown_start_time = None
+
         # save config
         if self._cfg.common.save_config:
             self._save_config()
@@ -666,6 +690,9 @@ class MPCController(Node):
             self.get_logger().info(f'\033[32mLap {self._current_laps} completed! Lap time: {self._last_lap_time} s\033[0m')
             self._lap_times[self._current_laps] = self._last_lap_time
             self._current_laps = laps
+            # Notify SteerGainConfigurator so it switches to warm-tire gains from lap 2 onward
+            if self._steer_gain_configurator is not None:
+                self._steer_gain_configurator.set_lap(self._current_laps)
 
         self._last_lap_time = lap_time
 
@@ -877,9 +904,59 @@ class MPCController(Node):
             u = [0.0, 0.0]
             # continue
 
+        # Wall Recovery State Machine
+        is_recovering = False
+        if self._recovery_enabled and self._enable_control:
+            now_sec = t
+
+            if self._recovery_state == "RECOVERING":
+                if self._recovering_start_time is None:
+                    self._recovering_start_time = now_sec
+
+                if (now_sec - self._recovering_start_time) < self._recovery_reverse_time_sec:
+                    is_recovering = True
+                    u[0] = self._recovery_reverse_vel
+                    u[1] = 0.0
+                    # Override steer gain to fixed recovery gain during recovery
+                    self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
+                else:
+                    self.get_logger().info("Wall recovery completed! Resuming normal driving...")
+                    self._recovery_state = "COOLDOWN"
+                    self._cooldown_start_time = now_sec
+                    self._stuck_start_time = None
+                    self._recovering_start_time = None
+                    self._last_u = np.array([0.0, 0.0])
+                    self._last_acc = 0.0
+                    self._car.update_reference_path(self._car.reference_path)
+
+            elif self._recovery_state == "COOLDOWN":
+                if self._cooldown_start_time is not None and (now_sec - self._cooldown_start_time) >= self._recovery_cooldown_sec:
+                    self._recovery_state = "NORMAL"
+                    self._cooldown_start_time = None
+
+            elif self._recovery_state == "NORMAL":
+                # Trigger recovery if target forward speed > 1.0 m/s but actual vehicle speed |v| < threshold for stuck_time_sec
+                if u[0] > 1.0 and abs(v) < self._recovery_stuck_vel_threshold:
+                    if self._stuck_start_time is None:
+                        self._stuck_start_time = now_sec
+                    elif (now_sec - self._stuck_start_time) >= self._recovery_stuck_time_sec:
+                        self.get_logger().warn("Stuck detected! (|v| < 0.5 km/h for 1s). Starting reverse recovery...")
+                        self._recovery_state = "RECOVERING"
+                        self._recovering_start_time = now_sec
+                        is_recovering = True
+                        u[0] = self._recovery_reverse_vel
+                        u[1] = 0.0
+                        self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
+                else:
+                    self._stuck_start_time = None
+
         acc = 0.
         bug_acc_enabled = False
-        if self.USE_BUG_ACC:
+        if is_recovering:
+            bug_acc_enabled = False
+            acc = self.KP * (u[0] - v)
+            acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
+        elif self.USE_BUG_ACC:
             def deg2rad(deg):
                 return deg * np.pi / 180.0
 
