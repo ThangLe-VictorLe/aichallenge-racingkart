@@ -23,8 +23,40 @@ import os
 import sys
 import argparse
 import yaml
+import numpy as np
 from collections import OrderedDict
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Optional
+
+
+def compute_max_wp_from_csv(csv_path: str, resolution: float = 0.6, smoothing_distance: int = 2) -> int:
+    """
+    Mirrors build_track_xy() from plot_track_waypoints.py.
+    Returns the exact interpolated WP count produced by ReferencePath for this CSV.
+    """
+    data = np.genfromtxt(csv_path, delimiter=',', names=True)
+    if 'x_m' in data.dtype.names and 'y_m' in data.dtype.names:
+        raw_x = data['x_m'].tolist()
+        raw_y = data['y_m'].tolist()
+    elif 'x' in data.dtype.names and 'y' in data.dtype.names:
+        raw_x = data['x'].tolist()
+        raw_y = data['y'].tolist()
+    else:
+        raise ValueError("CSV has no x/y columns")
+
+    raw_x = raw_x + raw_x[:smoothing_distance * 3]
+    raw_y = raw_y + raw_y[:smoothing_distance * 3]
+
+    n_wp = [max(1, int(np.sqrt((raw_x[i+1]-raw_x[i])**2 +
+                               (raw_y[i+1]-raw_y[i])**2) / resolution))
+            for i in range(len(raw_x)-1)]
+
+    gp_x = raw_x[-1]
+    wp_x = [np.linspace(raw_x[i], raw_x[i+1], n_wp[i], endpoint=False).tolist()
+            for i in range(len(raw_x)-1)]
+    wp_x = [w for seg in wp_x for w in seg] + [gp_x]
+
+    num_wps = len(wp_x) - 2 * smoothing_distance
+    return max(0, num_wps - 1)  # last valid wp_id
 
 # ______________________________________________
 # Edit here
@@ -179,35 +211,42 @@ def process_directory(
             process_file(in_file, out_file, step=step, max_wp=max_wp, interpolate=interpolate)
 
 
-def generate_default_configs(config_dir: str, step: int = 5, max_wp: int = 498):
-    """Generates standard default 5-wp steer_gain.yaml and ref_vel.yaml if needed."""
+def generate_default_configs(config_dir: str, step: int = 5, max_wp: int = None):
+    # Auto-compute from CSV if not supplied
+    if max_wp is None:
+        pkg_dir = os.path.dirname(config_dir)
+        try:
+            with open(os.path.join(config_dir, "config.yaml"), 'r') as f:
+                cfg = yaml.safe_load(f)
+                csv_rel = cfg.get("reference_path", {}).get("csv_path", "")
+            csv_path = os.path.join(pkg_dir, csv_rel) if csv_rel else None
+            if not csv_path or not os.path.exists(csv_path):
+                csv_path = os.path.join(pkg_dir, "env", "final_ver3", "mincurv_edit.csv")
+            max_wp = compute_max_wp_from_csv(csv_path)
+            print(f"[INFO] Auto-detected max_wp={max_wp} from {os.path.basename(csv_path)}")
+        except Exception as e:
+            max_wp = 560
+            print(f"[WARN] Could not compute max_wp from CSV ({e}), falling back to {max_wp}")
     # Default ref_vel map
     def get_default_vel(wp_id):
-        if wp_id < 100:
-            return 30.0
-        elif wp_id < 155:
-            return 22.0
-        elif wp_id < 190:
-            return 30.0
-        elif wp_id < 265:
-            return 22.0
-        elif wp_id < 290:
-            return 30.0
-        elif wp_id < 320:
-            return 25.0
-        else:
-            return 30.0
+        return 50.0
 
     # Default steer_gain map
     def get_default_gain(wp_id):
-        if 20 < wp_id < 60:
-            return 0.9
-        elif 85 < wp_id < 105:
-            return 0.9
-        elif 130 < wp_id < 150:
-            return 0.9
+        if wp_id <= 45:
+            return 1.0
+        elif 85 <= wp_id <= 130:
+            return 1.5
+        elif 155 <= wp_id <= 200:
+            return 1.0
+        elif 250 <= wp_id <= 305:
+            return 1.0
+        elif 310 <= wp_id <= 450:
+            return 1.6
+        elif 455 <= wp_id <= 515:
+            return 1.0
         else:
-            return 1.9
+            return 0.0
 
     # ref_vel
     ref_vel_dict = {"ref_vel_configulator": {}}
@@ -247,7 +286,8 @@ def main():
     parser.add_argument("-i", "--input", type=str, help="Input YAML file or directory path")
     parser.add_argument("-o", "--output", type=str, help="Output YAML file or directory path")
     parser.add_argument("-s", "--step", type=int, default=5, help="Waypoint step size (default: 5)")
-    parser.add_argument("-m", "--max-wp", type=int, default=498, help="Maximum waypoint index (default: 498)")
+    parser.add_argument("-m", "--max-wp", type=int, default=None,
+                        help="Maximum waypoint index (default: auto-computed from CSV)")
     parser.add_argument("--interpolate", action="store_true", help="Use linear interpolation when resampling")
     parser.add_argument("--default-val", type=float, default=1.0, help="Fallback default value if needed")
 

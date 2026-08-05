@@ -23,7 +23,7 @@ reference_path:
   update_by_topic: false # When true, 'circle' must be false
   # path from pkg share dir
   # csv_path: ""
-  csv_path: "env/final_ver3/traj_mincurv.csv"
+  csv_path: "env/final_ver3/mincurv_edit.csv"
   resolution: 0.6
   smoothing_distance: 2
   max_width: 6.0
@@ -39,19 +39,19 @@ bicycle_model:
   width: 1.5   # artificially squeezed to force strict tracking
 
 mpc:
-  use_csv_velocity: false
+  use_csv_velocity: true
   use_dynamic_steer_gain: true
   N: 20
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
   R: [100000.0, 100000.0]
-  a_min: -3.0 # m/s^2
+  a_min: -11.505 # m/s^2
   a_max: 3.0 # m/s^2
   delta_max_deg: 32.0 # degrees
   steer_rate_max: 1.5 # rad/s
   control_rate: 40.0 # Hz
-  steering_tire_angle_gain_var: 1.9
+  steering_tire_angle_gain_var: 1.0
   # steering_tire_angle_gain_var: 1.0
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
@@ -112,3 +112,13 @@ v2x_obstacle_avoidance:
   vehicle_radius: 0.5          # [m]
   v_max_safety: 30.0           # [m/s]
   position_jump_threshold: 5.0 # [m]
+
+recovery:
+  enable: true
+  stuck_vel_threshold_kmh: 0.5   # [km/h] threshold to consider vehicle stuck
+  stuck_time_sec: 1.0            # [s] seconds stuck before triggering recovery
+  reverse_vel_kmh: -5.0          # [km/h] speed when reversing out
+  reverse_time_sec: 1.5          # [s] duration to reverse
+  recovery_steer_gain: 1.0       # fixed steer gain override during recovery
+  cooldown_sec: 2.0              # [s] cooldown duration after recovery finishes
+

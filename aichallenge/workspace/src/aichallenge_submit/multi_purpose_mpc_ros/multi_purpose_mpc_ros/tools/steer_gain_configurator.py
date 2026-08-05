@@ -42,7 +42,7 @@ class SteerGainConfigurator:
         self._steer_gain_config_path = steer_gain_config_path
         self._reference_path = ReferencePathGenerator.get_reference_path(ref_path_config_path)
         self._steer_gain_cfg = self._load_config(steer_gain_config_path)
-        
+
         # Load raw ref_vel config to track parameter updates
         ref_vel_path = os.path.join(os.path.dirname(self._steer_gain_config_path), "ref_vel.yaml")
         try:
@@ -54,6 +54,9 @@ class SteerGainConfigurator:
         self._ref_vel_map = self._load_ref_vel_map()
         self._label_step = 5
 
+        # Lap-aware gain: starts at lap 1 (cold tires), switches to gain_warm on lap 2+
+        self._current_lap: int = 1
+
         self._sorted_wp_id_gain_map: OrderedDict[int, float] = OrderedDict()
         self._setup_publisher()
         self._register_params()
@@ -62,6 +65,25 @@ class SteerGainConfigurator:
         self._section_marker_array = MarkerArray()
         self._update_marker()
         self._timer = self._node.create_timer(2.0, self._timer_callback)
+
+    def set_lap(self, lap: int) -> None:
+        """Called by mpc_controller when a new lap starts.
+        Switches between cold-tire gains (lap 1) and warm-tire gains (lap 2+).
+        """
+        if lap == self._current_lap:
+            return
+        self._current_lap = lap
+        tier = "warm" if lap >= 2 else "cold"
+        self._node.get_logger().info(
+            f"\033[36m[SteerGainConfigurator] Lap {lap} — switching to {tier}-tire gains\033[0m"
+        )
+        self._update_marker()  # rebuilds _sorted_wp_id_gain_map with new effective gains
+
+    def _get_effective_gain(self, section_dict: dict) -> float:
+        """Return gain_warm if lap >= 2 and the field exists, else fall back to gain."""
+        if self._current_lap >= 2 and "gain_warm" in section_dict:
+            return float(section_dict["gain_warm"])
+        return float(section_dict["gain"])
 
     @classmethod
     def _load_config(cls, config_path: str) -> Dict:
@@ -111,7 +133,7 @@ class SteerGainConfigurator:
         def declare_parameters():
             for section_name, info in self._steer_gain_cfg.items():
                 for key, value in info.items():
-                    if key != "wp_id" and key != "gain":
+                    if key not in ("wp_id", "gain", "gain_warm"):
                         raise ValueError(f"Invalid key in steer_gain config: {key}")
                     self._node.declare_parameter(f"steer_gain/{section_name}/{key}", value)
 
@@ -129,10 +151,16 @@ class SteerGainConfigurator:
                         if os.path.exists(self._steer_gain_config_path):
                             shutil.copy2(self._steer_gain_config_path, backup_filename)
 
-                        cfg_for_save = { "steer_gain_configurator": self._steer_gain_cfg }
+                        # Sort the config numerically by the section integer (e.g., s2 -> 2)
+                        sorted_items = sorted(
+                            self._steer_gain_cfg.items(),
+                            key=lambda item: int(item[0][1:]) if item[0].startswith('s') and item[0][1:].isdigit() else 0
+                        )
+                        sorted_cfg = {k: v for k, v in sorted_items}
+                        cfg_for_save = { "steer_gain_configurator": sorted_cfg }
                         # save current config
                         with open(self._steer_gain_config_path, 'w', encoding='utf-8') as file:
-                            yaml.dump(cfg_for_save, file, allow_unicode=True, default_flow_style=False)
+                            yaml.dump(cfg_for_save, file, allow_unicode=True, default_flow_style=False, sort_keys=False)
                     elif param.name == "steer_gain/label_step":
                         self._label_step = max(1, int(param.value))
                         self._node.get_logger().info(f"Updated steer_gain label_step to {self._label_step}")
@@ -186,7 +214,7 @@ class SteerGainConfigurator:
 
         sorted_dict = sorted(
             (
-                (int(v["wp_id"]), Section(k, float(v["gain"])))
+                (int(v["wp_id"]), Section(k, self._get_effective_gain(v)))
                 for k, v in self._steer_gain_cfg.items()
             ),
             key=lambda item: int(item[0]),
@@ -196,7 +224,7 @@ class SteerGainConfigurator:
         self._sorted_wp_id_gain_map = OrderedDict(
             sorted(
                 (
-                    (int(v["wp_id"]), float(v["gain"]))
+                    (int(v["wp_id"]), self._get_effective_gain(v))
                     for k, v in self._steer_gain_cfg.items()
                 ),
                 key=lambda item: int(item[0]),
