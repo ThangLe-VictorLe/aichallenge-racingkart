@@ -30,6 +30,7 @@ from rclpy.parameter import Parameter
 # autoware
 from autoware_auto_control_msgs.msg import AckermannControlCommand
 from autoware_auto_planning_msgs.msg import Trajectory
+from autoware_auto_vehicle_msgs.msg import GearCommand
 from v2x_msgs.msg import V2XVehiclePositionArray
 from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
     V2XVehicleTracker,
@@ -520,25 +521,32 @@ class MPCController(Node):
         recovery_cfg = getattr(self._cfg, 'recovery', None)
         if recovery_cfg is not None:
             self._recovery_enabled = bool(getattr(recovery_cfg, 'enable', True))
+            # stuck threshold: odom velocity is in m/s
             self._recovery_stuck_vel_threshold = float(getattr(recovery_cfg, 'stuck_vel_threshold_kmh', 0.5)) / 3.6
             self._recovery_stuck_time_sec = float(getattr(recovery_cfg, 'stuck_time_sec', 1.0))
-            self._recovery_reverse_vel = float(getattr(recovery_cfg, 'reverse_vel_kmh', -5.0)) / 3.6
+            # u[0] (speed target) is in km/h — no unit conversion needed
+            self._recovery_reverse_vel = float(getattr(recovery_cfg, 'reverse_vel_kmh', -5.0))
             self._recovery_reverse_time_sec = float(getattr(recovery_cfg, 'reverse_time_sec', 1.5))
             self._recovery_steer_gain = float(getattr(recovery_cfg, 'recovery_steer_gain', 1.0))
+            self._post_recovery_steer_gain = float(getattr(recovery_cfg, 'post_recovery_steer_gain', 1.0))
             self._recovery_cooldown_sec = float(getattr(recovery_cfg, 'cooldown_sec', 2.0))
         else:
             self._recovery_enabled = True
-            self._recovery_stuck_vel_threshold = 0.5 / 3.6
+            self._recovery_stuck_vel_threshold = 0.5 / 3.6  # m/s
             self._recovery_stuck_time_sec = 1.0
-            self._recovery_reverse_vel = -5.0 / 3.6
+            self._recovery_reverse_vel = -5.0  # km/h (same unit as u[0])
             self._recovery_reverse_time_sec = 1.5
             self._recovery_steer_gain = 1.0
+            self._post_recovery_steer_gain = 1.0
             self._recovery_cooldown_sec = 2.0
 
         self._recovery_state = "NORMAL"
         self._stuck_start_time = None
         self._recovering_start_time = None
         self._cooldown_start_time = None
+        # Only allow stuck detection after the kart has moved at least once
+        # (prevents false trigger at race start when v=0 but MPC commands speed)
+        self._has_moved = False
 
         # save config
         if self._cfg.common.save_config:
@@ -561,6 +569,10 @@ class MPCController(Node):
           self._command_raw_pub = self.create_publisher(
             AckermannControlCommand, "/control/command/control_cmd_raw", 1)
           print("use normal ackermann control command")
+
+        # Gear command publisher for recovery (DRIVE/REVERSE)
+        self._gear_pub = self.create_publisher(
+            GearCommand, "/control/command/gear_cmd", 1)
 
         # NOTE:評価環境での可視化のためにダミーのトピック名を使用
         self._mpc_pred_pub = self.create_publisher(
@@ -863,7 +875,15 @@ class MPCController(Node):
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
-        if self._steer_gain_configurator is not None:
+        if self._recovery_state == "RECOVERING":
+            self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._recovery_steer_gain
+            self._mpc.update_max_steering_rate(scaled_steer_rate_max)
+        elif self._recovery_state == "COOLDOWN":
+            self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._post_recovery_steer_gain
+            self._mpc.update_max_steering_rate(scaled_steer_rate_max)
+        elif self._steer_gain_configurator is not None:
             current_gain = self._steer_gain_configurator.get_steer_gain(self._mpc.model.wp_id, interpolate=True)
             self._mpc_cfg.steering_tire_angle_gain_var = current_gain
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / current_gain
@@ -910,17 +930,16 @@ class MPCController(Node):
             now_sec = t
 
             if self._recovery_state == "RECOVERING":
-                if self._recovering_start_time is None:
-                    self._recovering_start_time = now_sec
-
                 if (now_sec - self._recovering_start_time) < self._recovery_reverse_time_sec:
                     is_recovering = True
-                    u[0] = self._recovery_reverse_vel
-                    u[1] = 0.0
+                    # AWSIM: REVERSE gear + positive acc/speed moves the kart backward
+                    u[0] = abs(self._recovery_reverse_vel)  # positive km/h target in REVERSE gear
+                    # Negate steer: reverse opposite to forward path direction to back away from wall
+                    u[1] = -u[1]
                     # Override steer gain to fixed recovery gain during recovery
                     self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
                 else:
-                    self.get_logger().info("Wall recovery completed! Resuming normal driving...")
+                    self.get_logger().info("Wall recovery completed! Switching to DRIVE, resuming normal driving...")
                     self._recovery_state = "COOLDOWN"
                     self._cooldown_start_time = now_sec
                     self._stuck_start_time = None
@@ -928,25 +947,45 @@ class MPCController(Node):
                     self._last_u = np.array([0.0, 0.0])
                     self._last_acc = 0.0
                     self._car.update_reference_path(self._car.reference_path)
+                    self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
+                    # Shift back to DRIVE gear so forward motion resumes
+                    gear_msg = GearCommand()
+                    gear_msg.stamp = self.get_clock().now().to_msg()
+                    gear_msg.command = GearCommand.DRIVE
+                    self._gear_pub.publish(gear_msg)
 
             elif self._recovery_state == "COOLDOWN":
+                self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
                 if self._cooldown_start_time is not None and (now_sec - self._cooldown_start_time) >= self._recovery_cooldown_sec:
                     self._recovery_state = "NORMAL"
                     self._cooldown_start_time = None
+                    self.get_logger().info("Recovery cooldown done. Back to NORMAL.")
 
             elif self._recovery_state == "NORMAL":
-                # Trigger recovery if target forward speed > 1.0 m/s but actual vehicle speed |v| < threshold for stuck_time_sec
-                if u[0] > 1.0 and abs(v) < self._recovery_stuck_vel_threshold:
+                # Track whether the kart has ever moved (guards against false trigger at race start)
+                if abs(v) > self._recovery_stuck_vel_threshold:
+                    self._has_moved = True
+
+                # u[0] is in km/h; v is in m/s. Stuck = forward commanded (u[0] > 3.6 km/h) but not moving.
+                # Only trigger after kart has actually moved at least once.
+                if self._has_moved and u[0] > 3.6 and abs(v) < self._recovery_stuck_vel_threshold:
                     if self._stuck_start_time is None:
                         self._stuck_start_time = now_sec
+                        self.get_logger().warn("Stuck timer started...", throttle_duration_sec=1.0)
                     elif (now_sec - self._stuck_start_time) >= self._recovery_stuck_time_sec:
-                        self.get_logger().warn("Stuck detected! (|v| < 0.5 km/h for 1s). Starting reverse recovery...")
+                        self.get_logger().warn(f"Stuck detected! Switching to REVERSE gear, recovering for {self._recovery_reverse_time_sec}s...")
                         self._recovery_state = "RECOVERING"
                         self._recovering_start_time = now_sec
                         is_recovering = True
-                        u[0] = self._recovery_reverse_vel
-                        u[1] = 0.0
+                        u[0] = abs(self._recovery_reverse_vel)  # positive km/h in REVERSE gear
+                        # Negate steer: reverse opposite to forward path direction to back away from wall
+                        u[1] = -u[1]
                         self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
+                        # Shift to REVERSE gear
+                        gear_msg = GearCommand()
+                        gear_msg.stamp = self.get_clock().now().to_msg()
+                        gear_msg.command = GearCommand.REVERSE
+                        self._gear_pub.publish(gear_msg)
                 else:
                     self._stuck_start_time = None
 
@@ -954,8 +993,8 @@ class MPCController(Node):
         bug_acc_enabled = False
         if is_recovering:
             bug_acc_enabled = False
-            acc = self.KP * (u[0] - v)
-            acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
+            # AWSIM: REVERSE gear + positive acc moves backward
+            acc = self._mpc_cfg.a_max  # full forward acc in REVERSE gear = move backward
         elif self.USE_BUG_ACC:
             def deg2rad(deg):
                 return deg * np.pi / 180.0
