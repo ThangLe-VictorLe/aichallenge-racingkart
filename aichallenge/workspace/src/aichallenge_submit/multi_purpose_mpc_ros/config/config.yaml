@@ -36,7 +36,7 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.5   # artificially squeezed to force strict tracking
+  width: 2.0   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: true
@@ -116,9 +116,10 @@ v2x_obstacle_avoidance:
 recovery:
   enable: true
   stuck_vel_threshold_kmh: 0.5   # [km/h] threshold to consider vehicle stuck
-  stuck_time_sec: 1.0            # [s] seconds stuck before triggering recovery
+  stuck_time_sec: 0.7            # [s] seconds stuck before triggering recovery
   reverse_vel_kmh: -5.0          # [km/h] speed when reversing out
-  reverse_time_sec: 1.5          # [s] duration to reverse
-  recovery_steer_gain: 1.0       # fixed steer gain override during recovery
-  cooldown_sec: 2.0              # [s] cooldown duration after recovery finishes
+  reverse_time_sec: 3.0          # [s] duration to reverse
+  recovery_steer_gain: 2.0       # fixed steer gain override during recovery
+  post_recovery_steer_gain: 2.0  # fixed steer gain override AFTER recovery (during cooldown)
+  cooldown_sec: 6.0              # [s] cooldown duration after recovery finishes
 
