@@ -463,6 +463,15 @@ class MPCController(Node):
         self._mpc_cfg, self._mpc = create_mpc(self._car)
         compute_speed_profile(self._car, self._mpc_cfg)
 
+        if self.USE_OBSTACLE_AVOIDANCE:
+            # Pre-build the static path constraints table so it is always available
+            # as a clean fallback when obstacle avoidance is temporarily suppressed
+            # (recovery, cooldown, stopped). Without this the static-bounds branch in
+            # MPC._init_problem reads from an empty array and crashes.
+            self._reference_path.update_simple_path_constraints(
+                int(self._mpc_cfg.N),
+                self._car.safety_margin)
+
         if self._mpc_cfg.use_csv_velocity:
             self.get_logger().info("Using CSV vx_mps for velocity (ReferenceVelocityConfigulator disabled)")
             self._ref_vel_configulator: Optional[ReferenceVelocityConfigulator] = None
@@ -504,6 +513,17 @@ class MPCController(Node):
             wps = self._reference_path.waypoints
             self._waypoint_xy = np.asarray(
                 [(wp.x, wp.y) for wp in wps], dtype=np.float64)
+            # Build cumulative arc-length array for Frenet-frame proximity check
+            diffs = np.diff(self._waypoint_xy, axis=0)
+            seg_lengths = np.hypot(diffs[:, 0], diffs[:, 1])
+            self._waypoint_s = np.concatenate([[0.0], np.cumsum(seg_lengths)])
+            self._total_track_s = float(self._waypoint_s[-1])
+            # Proximity gate params (with hysteresis)
+            self._v2x_activation_dist = float(v2x_cfg.activation_distance_m)  # type: ignore
+            self._v2x_deactivation_dist = float(v2x_cfg.deactivation_distance_m)  # type: ignore
+            self._overtaking_steer_gain = float(v2x_cfg.overtaking_steer_gain)  # type: ignore
+            # Runtime state
+            self._v2x_avoidance_active = False
 
         # Laps
         self._current_laps = 1
@@ -530,6 +550,9 @@ class MPCController(Node):
             self._recovery_steer_gain = float(getattr(recovery_cfg, 'recovery_steer_gain', 1.0))
             self._post_recovery_steer_gain = float(getattr(recovery_cfg, 'post_recovery_steer_gain', 1.0))
             self._recovery_cooldown_sec = float(getattr(recovery_cfg, 'cooldown_sec', 2.0))
+            raw_disabled = getattr(recovery_cfg, 'disabled_waypoints', None)
+            if raw_disabled is None:
+                raw_disabled = getattr(recovery_cfg, 'disabled_waypoint_ranges', None)
         else:
             self._recovery_enabled = True
             self._recovery_stuck_vel_threshold = 0.5 / 3.6  # m/s
@@ -539,6 +562,19 @@ class MPCController(Node):
             self._recovery_steer_gain = 1.0
             self._post_recovery_steer_gain = 1.0
             self._recovery_cooldown_sec = 2.0
+            raw_disabled = None
+
+        self._recovery_disabled_ranges: List[Tuple[int, int]] = []
+        if raw_disabled is not None:
+            if isinstance(raw_disabled, list):
+                if len(raw_disabled) == 2 and all(isinstance(x, (int, float)) for x in raw_disabled):
+                    self._recovery_disabled_ranges.append((int(raw_disabled[0]), int(raw_disabled[1])))
+                else:
+                    for item in raw_disabled:
+                        if isinstance(item, (list, tuple)) and len(item) == 2:
+                            self._recovery_disabled_ranges.append((int(item[0]), int(item[1])))
+                        elif isinstance(item, (int, float)):
+                            self._recovery_disabled_ranges.append((int(item), int(item)))
 
         self._recovery_state = "NORMAL"
         self._stuck_start_time = None
@@ -652,6 +688,12 @@ class MPCController(Node):
         self._command_pub.publish(cmd)
 
 
+    def _is_recovery_disabled_at_wp(self, wp_id: int) -> bool:
+        for start_wp, end_wp in self._recovery_disabled_ranges:
+            if start_wp <= wp_id <= end_wp:
+                return True
+        return False
+
     def _odom_callback(self, msg: Odometry) -> None:
         self._odom = msg
 
@@ -659,6 +701,14 @@ class MPCController(Node):
         if msg.data and not self._enable_control:
             self.get_logger().info("Control mode request received")
             self._enable_control = True
+            self._has_moved = False
+            self._recovery_state = "NORMAL"
+            self._stuck_start_time = None
+        elif not msg.data and self._enable_control:
+            self._enable_control = False
+            self._has_moved = False
+            self._recovery_state = "NORMAL"
+            self._stuck_start_time = None
 
     def _path_constraints_callback(self, msg: PathConstraints):
         self._reference_path.set_path_constraints(
@@ -666,10 +716,70 @@ class MPCController(Node):
 
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
         self._v2x_tracker.update(msg)
-        predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
-        self._dynamic_obstacles = predictions_to_obstacles(
-            predictions, self._v2x_vehicle_radius)
-        self._obstacles_updated = True
+
+        # === PROXIMITY GATE WITH HYSTERESIS ===
+        # Only activate the heavy update_path_constraints path when an opponent
+        # is detected AHEAD of us within activation_distance_m along the raceline.
+        # Deactivate only when all opponents are beyond deactivation_distance_m
+        # (hysteresis prevents rapid toggling at the boundary).
+        ego_wp_id = self._mpc.model.wp_id if self._mpc is not None else 0
+        ego_s = self._waypoint_s[min(ego_wp_id, len(self._waypoint_s) - 1)]
+        track_len = self._total_track_s
+        activate_threshold = self._v2x_activation_dist
+        deactivate_threshold = self._v2x_deactivation_dist
+
+        any_opponent_in_activate_range = False
+        any_opponent_in_deactivate_range = False
+        for v in msg.vehicles:
+            opp_x = float(v.position.x)
+            opp_y = float(v.position.y)
+            # Snap opponent to nearest waypoint
+            dxy = self._waypoint_xy - np.array([opp_x, opp_y], dtype=np.float64)
+            dists_sq = np.einsum('ij,ij->i', dxy, dxy)
+            nearest_wp_id = int(np.argmin(dists_sq))
+            # Skip if this is the ego vehicle (same position as us)
+            if np.sqrt(dists_sq[nearest_wp_id]) < 0.8:
+                continue
+            opp_s = self._waypoint_s[nearest_wp_id]
+            # Signed forward distance along raceline; wraps cleanly on circular track
+            ds = (opp_s - ego_s) % track_len
+            # ds in (0, track_len): small = just ahead, large = behind us
+            if 0.0 < ds <= activate_threshold:
+                any_opponent_in_activate_range = True
+                break
+            if 0.0 < ds <= deactivate_threshold:
+                any_opponent_in_deactivate_range = True
+
+        # Apply hysteresis: activate on close approach, deactivate only when all clear
+        prev_active = self._v2x_avoidance_active
+        if any_opponent_in_activate_range:
+            self._v2x_avoidance_active = True
+        elif not any_opponent_in_deactivate_range:
+            self._v2x_avoidance_active = False
+        # else: opponent is between activate and deactivate thresholds — hold current state
+
+        if self._v2x_avoidance_active != prev_active:
+            if self._v2x_avoidance_active:
+                self.get_logger().warn(
+                    "[V2X] Overtaking mode ACTIVATED — opponent within "
+                    f"{activate_threshold:.0f} m ahead. Steer gain -> {self._overtaking_steer_gain}")
+            else:
+                self.get_logger().info(
+                    "[V2X] Overtaking mode DEACTIVATED — no opponent within "
+                    f"{deactivate_threshold:.0f} m ahead. Resuming normal steer gain.")
+
+        if self._v2x_avoidance_active:
+            predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
+            self._dynamic_obstacles = predictions_to_obstacles(
+                predictions, self._v2x_vehicle_radius)
+            # Only trigger map update if not in recovery — wall proximity makes solver infeasible
+            if self._recovery_state not in ("RECOVERING", "COOLDOWN"):
+                self._obstacles_updated = True
+        else:
+            # Opponent left range — clear dynamic obstacles so map resets to clean static corridor
+            if self._dynamic_obstacles:
+                self._dynamic_obstacles = []
+                self._obstacles_updated = True  # trigger map reset to clear old obstacle blobs
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
         if not obstacles or self._waypoint_xy.size == 0:
@@ -858,8 +968,14 @@ class MPCController(Node):
         if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
             self._obstacles_updated = False
             self._map.reset_map()
-            filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
-            self._map.add_obstacles(self._static_obstacles + filtered_dynamic)
+            if self._v2x_avoidance_active and self._recovery_state == "NORMAL":
+                # Full obstacle avoidance: rasterize opponent predictions onto occupancy map
+                filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
+                self._map.add_obstacles(self._static_obstacles + filtered_dynamic)
+            else:
+                # No active opponent or in recovery: use only static track boundaries
+                # (prevents solver infeasibility from near-wall positions during recovery)
+                self._map.add_obstacles(self._static_obstacles)
             self._reference_path.reset_dynamic_constraints()
 
         is_colliding = False
@@ -883,15 +999,37 @@ class MPCController(Node):
             self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._post_recovery_steer_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
+        elif self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
+            # Override per-waypoint steer gain with fixed overtaking gain while opponent is close
+            self._mpc_cfg.steering_tire_angle_gain_var = self._overtaking_steer_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._overtaking_steer_gain
+            self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         elif self._steer_gain_configurator is not None:
             current_gain = self._steer_gain_configurator.get_steer_gain(self._mpc.model.wp_id, interpolate=True)
             self._mpc_cfg.steering_tire_angle_gain_var = current_gain
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / current_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
 
+        # Temporarily suppress obstacle avoidance inside the MPC solver when we are in
+        # recovery, cooldown, or essentially stopped (|v| < 0.5 km/h). In those states
+        # the kart is near a wall and update_path_constraints returns empty/infeasible
+        # segments, which freeze the solver (u=[0,0]). Falling back to pre-computed
+        # static bounds gives the same fast, stable behaviour as use_obstacle_avoidance=False.
+        _suppress_obs_avoidance = (
+            self.USE_OBSTACLE_AVOIDANCE and (
+                self._recovery_state in ("RECOVERING", "COOLDOWN")
+                or abs(v) < 0.5 / 3.6  # < 0.5 km/h  ≈ nearly stopped
+            )
+        )
+        if _suppress_obs_avoidance:
+            self._mpc.use_obstacle_avoidance = False
+
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
             # self.get_logger().info(f"u: {u}")
+
+        if _suppress_obs_avoidance:
+            self._mpc.use_obstacle_avoidance = True
 
         if self._mpc_cfg.use_csv_velocity:
             # We use the interpolated vx_mps from the CSV (stored in wp.v_ref)
@@ -962,32 +1100,40 @@ class MPCController(Node):
                     self.get_logger().info("Recovery cooldown done. Back to NORMAL.")
 
             elif self._recovery_state == "NORMAL":
-                # Track whether the kart has ever moved (guards against false trigger at race start)
-                if abs(v) > self._recovery_stuck_vel_threshold:
-                    self._has_moved = True
+                curr_wp_id = self._mpc.model.wp_id
+                wp_disabled = self._is_recovery_disabled_at_wp(curr_wp_id)
 
-                # u[0] is in km/h; v is in m/s. Stuck = forward commanded (u[0] > 3.6 km/h) but not moving.
-                # Only trigger after kart has actually moved at least once.
-                if self._has_moved and u[0] > 3.6 and abs(v) < self._recovery_stuck_vel_threshold:
-                    if self._stuck_start_time is None:
-                        self._stuck_start_time = now_sec
-                        self.get_logger().warn("Stuck timer started...", throttle_duration_sec=1.0)
-                    elif (now_sec - self._stuck_start_time) >= self._recovery_stuck_time_sec:
-                        self.get_logger().warn(f"Stuck detected! Switching to REVERSE gear, recovering for {self._recovery_reverse_time_sec}s...")
-                        self._recovery_state = "RECOVERING"
-                        self._recovering_start_time = now_sec
-                        is_recovering = True
-                        u[0] = abs(self._recovery_reverse_vel)  # positive km/h in REVERSE gear
-                        # Negate steer: reverse opposite to forward path direction to back away from wall
-                        u[1] = -u[1]
-                        self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
-                        # Shift to REVERSE gear
-                        gear_msg = GearCommand()
-                        gear_msg.stamp = self.get_clock().now().to_msg()
-                        gear_msg.command = GearCommand.REVERSE
-                        self._gear_pub.publish(gear_msg)
-                else:
+                if wp_disabled:
+                    # In disabled waypoint range (e.g. race start / garage)
+                    self._has_moved = False
                     self._stuck_start_time = None
+                else:
+                    # Track whether the kart has ever moved outside disabled zone
+                    if abs(v) > self._recovery_stuck_vel_threshold:
+                        self._has_moved = True
+
+                    # u[0] is in km/h; v is in m/s. Stuck = forward commanded (u[0] > 3.6 km/h) but not moving.
+                    # Only trigger after kart has actually moved at least once.
+                    if self._has_moved and u[0] > 3.6 and abs(v) < self._recovery_stuck_vel_threshold:
+                        if self._stuck_start_time is None:
+                            self._stuck_start_time = now_sec
+                            self.get_logger().warn("Stuck timer started...", throttle_duration_sec=1.0)
+                        elif (now_sec - self._stuck_start_time) >= self._recovery_stuck_time_sec:
+                            self.get_logger().warn(f"Stuck detected at wp {curr_wp_id}! Switching to REVERSE gear, recovering for {self._recovery_reverse_time_sec}s...")
+                            self._recovery_state = "RECOVERING"
+                            self._recovering_start_time = now_sec
+                            is_recovering = True
+                            u[0] = abs(self._recovery_reverse_vel)  # positive km/h in REVERSE gear
+                            # Negate steer: reverse opposite to forward path direction to back away from wall
+                            u[1] = -u[1]
+                            self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
+                            # Shift to REVERSE gear
+                            gear_msg = GearCommand()
+                            gear_msg.stamp = self.get_clock().now().to_msg()
+                            gear_msg.command = GearCommand.REVERSE
+                            self._gear_pub.publish(gear_msg)
+                    else:
+                        self._stuck_start_time = None
 
         acc = 0.
         bug_acc_enabled = False

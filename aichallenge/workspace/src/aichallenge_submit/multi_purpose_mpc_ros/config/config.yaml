@@ -23,7 +23,7 @@ reference_path:
   update_by_topic: false # When true, 'circle' must be false
   # path from pkg share dir
   # csv_path: ""
-  csv_path: "env/final_ver3/mincurv_edit.csv"
+  csv_path: "env/final_ver3/traj_mincurv.csv"
   resolution: 0.6
   smoothing_distance: 2
   max_width: 6.0
@@ -39,8 +39,8 @@ bicycle_model:
   width: 2.0   # artificially squeezed to force strict tracking
 
 mpc:
-  use_csv_velocity: true
-  use_dynamic_steer_gain: true
+  use_csv_velocity: false  
+  use_dynamic_steer_gain: false
   N: 20
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
@@ -51,7 +51,7 @@ mpc:
   delta_max_deg: 32.0 # degrees
   steer_rate_max: 1.5 # rad/s
   control_rate: 40.0 # Hz
-  steering_tire_angle_gain_var: 1.0
+  steering_tire_angle_gain_var: 1.6
   # steering_tire_angle_gain_var: 1.0
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
@@ -109,17 +109,31 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 0.5          # [m]
-  v_max_safety: 30.0           # [m/s]
-  position_jump_threshold: 5.0 # [m]
+  vehicle_radius: 0.5           # [m] clearance radius around opponent kart
+  v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
+  position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
+
+  # --- Proximity Gate ---
+  # Obstacle avoidance (heavy path-constraint computation) only fires when an
+  # opponent kart is detected AHEAD of us within this along-raceline distance.
+  # Hysteresis: activate at activation_distance_m, deactivate at deactivation_distance_m.
+  # Set activation_distance_m: 0.0 to fully disable, or a large value to always activate.
+  activation_distance_m: 30.0   # [m] turn ON avoidance when opponent closer than this
+  deactivation_distance_m: 35.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
+
+  # --- Overtaking Steer Gain ---
+  # Fixed steer gain applied while overtaking is active (overrides per-waypoint gain from steer_gain.yaml).
+  # Tune this to get smooth steering response during the overtake maneuver.
+  overtaking_steer_gain: 1.5    # [-] steer gain multiplier during active overtake
 
 recovery:
   enable: true
-  stuck_vel_threshold_kmh: 0.5   # [km/h] threshold to consider vehicle stuck
-  stuck_time_sec: 0.7            # [s] seconds stuck before triggering recovery
+  stuck_vel_threshold_kmh: 0.3   # [km/h] threshold to consider vehicle stuck
+  stuck_time_sec: 1.0            # [s] seconds stuck before triggering recovery
   reverse_vel_kmh: -5.0          # [km/h] speed when reversing out
   reverse_time_sec: 3.0          # [s] duration to reverse
   recovery_steer_gain: 2.0       # fixed steer gain override during recovery
   post_recovery_steer_gain: 2.0  # fixed steer gain override AFTER recovery (during cooldown)
   cooldown_sec: 6.0              # [s] cooldown duration after recovery finishes
+  disabled_waypoints: [45, 50]   # disable recovery at race start (waypoints 45 to 50)
 
