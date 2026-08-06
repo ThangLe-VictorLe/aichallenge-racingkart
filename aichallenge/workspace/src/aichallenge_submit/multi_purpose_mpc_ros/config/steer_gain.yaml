@@ -246,13 +246,13 @@ steer_gain_configurator:
     gain: 1.6
     wp_id: 405
   s82:
-    gain: 1.6
+    gain: 0.0
     wp_id: 410
   s83:
-    gain: 1.6
+    gain: 0.0
     wp_id: 415
   s84:
-    gain: 1.6
+    gain: 0.0
     wp_id: 420
   s85:
     gain: 1.6

@@ -96,23 +96,23 @@ void GraphWidget::paintEvent(QPaintEvent * /*event*/)
                QColor(80, 200, 255), "Speed (km/h)", cur);
   }
 
-  // ── ACCEL ──
+  // ── ACCEL (m/s²) ──
   {
     QRectF rect(margin_left, margin_top + graph_h, width() - margin_left - margin_right, graph_h);
     double cur = accel_buf_.empty() ? 0.0 : accel_buf_.back();
     drawGrid(p, rect);
-    drawSeries(p, rect, accel_buf_, 0.0, 1.0,
-               QColor(100, 230, 120), "Accel cmd", cur);
+    drawSeries(p, rect, accel_buf_, 0.0, 4.0,
+               QColor(100, 230, 120), "Accel (m/s²)", cur);
   }
 
-  // ── BRAKE ──
+  // ── BRAKE / DECEL (m/s²) ──
   {
     QRectF rect(margin_left, margin_top + graph_h * 2,
                 width() - margin_left - margin_right, graph_h);
     double cur = brake_buf_.empty() ? 0.0 : brake_buf_.back();
     drawGrid(p, rect);
-    drawSeries(p, rect, brake_buf_, 0.0, 1.0,
-               QColor(255, 90, 90), "Brake cmd", cur);
+    drawSeries(p, rect, brake_buf_, 0.0, 12.0,
+               QColor(255, 90, 90), "Brake (m/s²)", cur);
   }
 
   // Legend at the bottom
@@ -202,8 +202,8 @@ void GraphWidget::drawLegend(QPainter & p, const QRectF & rect)
   struct Entry { QColor color; QString label; };
   const Entry entries[] = {
     {QColor(80,  200, 255), "Speed km/h"},
-    {QColor(100, 230, 120), "Accel [0-1]"},
-    {QColor(255,  90,  90), "Brake [0-1]"},
+    {QColor(100, 230, 120), "Accel m/s²"},
+    {QColor(255,  90,  90), "Brake m/s²"},
   };
 
   QFont lf("monospace", 7);
