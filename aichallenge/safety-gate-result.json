@@ -1,0 +1,23 @@
+{
+    "schema_version": "v1",
+    "all_passed": true,
+    "gate_arg": "all",
+    "scenario_folder": "SafetyGate",
+    "tests": [
+        {
+            "test_name": "test1",
+            "passed": true,
+            "fail_reason": ""
+        },
+        {
+            "test_name": "test2",
+            "passed": true,
+            "fail_reason": ""
+        },
+        {
+            "test_name": "test3",
+            "passed": true,
+            "fail_reason": ""
+        }
+    ]
+}

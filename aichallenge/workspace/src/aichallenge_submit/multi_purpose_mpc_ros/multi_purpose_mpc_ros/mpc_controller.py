@@ -525,6 +525,17 @@ class MPCController(Node):
             # Runtime state
             self._v2x_avoidance_active = False
 
+        # --- Debug Visualization ---
+        # Read debug_visualization section from config (all flags default to False).
+        # Each flag can be toggled without rebuild — just change config.yaml and restart.
+        _dbg_cfg = getattr(self._cfg, 'debug_visualization', None)
+        self._dbg_v2x_log        = bool(getattr(_dbg_cfg, 'v2x_diagnostic_log', False))
+        self._dbg_corridor        = bool(getattr(_dbg_cfg, 'path_corridor', False))
+        self._dbg_dyn_obstacles   = bool(getattr(_dbg_cfg, 'dynamic_obstacles', False))
+        self._dbg_v2x_status_text = bool(getattr(_dbg_cfg, 'v2x_status_text', False))
+        self._dbg_pred_colors     = bool(getattr(_dbg_cfg, 'prediction_colors', False))
+        self._v2x_dbg_counter     = 0
+
         # Laps
         self._current_laps = 1
         self._last_lap_time = 0.0
@@ -622,6 +633,16 @@ class MPCController(Node):
             MarkerArray, "/mpc/ref_path", latching_qos)
         self._ref_path_pub_dummy = self.create_publisher(
             MarkerArray, "/planning/scenario_planning/lane_driving/behavior_planning/behavior_path_planner/debug/bound", latching_qos)
+
+        # Debug visualization publishers (only created when USE_OBSTACLE_AVOIDANCE is True
+        # because corridor/dynamic-obstacle features are only meaningful with V2X active).
+        if self.USE_OBSTACLE_AVOIDANCE:
+            self._v2x_status_pub = self.create_publisher(
+                MarkerArray, "/mpc/v2x_status", 1)
+            self._corridor_pub = self.create_publisher(
+                MarkerArray, "/mpc/path_corridor", 1)
+            self._dyn_obs_pub = self.create_publisher(
+                MarkerArray, "/mpc/dynamic_obstacles", 1)
 
         # Subscribers
         self._odom_sub = self.create_subscription(
@@ -738,7 +759,7 @@ class MPCController(Node):
             dists_sq = np.einsum('ij,ij->i', dxy, dxy)
             nearest_wp_id = int(np.argmin(dists_sq))
             # Skip if this is the ego vehicle (same position as us)
-            if np.sqrt(dists_sq[nearest_wp_id]) < 0.8:
+            if np.sqrt(dists_sq[nearest_wp_id]) < 0.1:
                 continue
             opp_s = self._waypoint_s[nearest_wp_id]
             # Signed forward distance along raceline; wraps cleanly on circular track
@@ -768,6 +789,9 @@ class MPCController(Node):
                     "[V2X] Overtaking mode DEACTIVATED — no opponent within "
                     f"{deactivate_threshold:.0f} m ahead. Resuming normal steer gain.")
 
+        # Store last message for _publish_v2x_status (needs vehicle IDs)
+        self._last_v2x_msg = msg
+
         if self._v2x_avoidance_active:
             predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
             self._dynamic_obstacles = predictions_to_obstacles(
@@ -780,6 +804,12 @@ class MPCController(Node):
             if self._dynamic_obstacles:
                 self._dynamic_obstacles = []
                 self._obstacles_updated = True  # trigger map reset to clear old obstacle blobs
+
+        # --- V2X diagnostic terminal log (throttled, enabled via config) ---
+        if self._dbg_v2x_log:
+            self._v2x_diagnostic_log(
+                msg, ego_wp_id, ego_s, track_len,
+                activate_threshold, deactivate_threshold)
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
         if not obstacles or self._waypoint_xy.size == 0:
@@ -866,6 +896,202 @@ class MPCController(Node):
     def _wait_until_path_constraints_received(self, timeout: float = 30.) -> None:
         if self.USE_OBSTACLE_AVOIDANCE and self._cfg.reference_path.use_path_constraints_topic: # type: ignore
             self._wait_until_message_received(lambda: self._reference_path.path_constraints, 'path constraints', timeout)
+
+    # =========================================================================
+    # Debug Visualization Helpers
+    # =========================================================================
+
+    def _v2x_diagnostic_log(self, msg, ego_wp_id, ego_s, track_len,
+                             activate_threshold, deactivate_threshold) -> None:
+        """Throttled terminal log: prints V2X vehicle positions/distances and gate state."""
+        self._v2x_dbg_counter += 1
+        if self._v2x_dbg_counter % 10 != 1:
+            return
+        lines = [
+            f"[V2X DBG] vehicles={len(msg.vehicles)}  "
+            f"ego_wp={ego_wp_id}  ego_s={ego_s:.1f}m"
+        ]
+        for v in msg.vehicles:
+            opp_x = float(v.position.x)
+            opp_y = float(v.position.y)
+            dxy = self._waypoint_xy - np.array([opp_x, opp_y], dtype=np.float64)
+            dists_sq = np.einsum('ij,ij->i', dxy, dxy)
+            nearest_wp = int(np.argmin(dists_sq))
+            nearest_dist = float(np.sqrt(dists_sq[nearest_wp]))
+            opp_s = self._waypoint_s[nearest_wp]
+            ds = (opp_s - ego_s) % track_len
+            is_ego = nearest_dist < 0.8
+            lines.append(
+                f"  vid={v.vehicle_id}  pos=({opp_x:.1f},{opp_y:.1f})"
+                f"  wp={nearest_wp}  dist_to_wp={nearest_dist:.2f}m"
+                f"  ds={ds:.1f}m ({'BEHIND' if ds > track_len / 2 else 'AHEAD'})"
+                + ("  [EGO SKIP]" if is_ego else "")
+            )
+        lines.append(
+            f"  gate={'ACTIVE' if self._v2x_avoidance_active else 'INACTIVE'}"
+            f"  activate<{activate_threshold:.0f}m"
+            f"  deactivate<{deactivate_threshold:.0f}m"
+            f"  dyn_obs={len(self._dynamic_obstacles)}"
+        )
+        self.get_logger().info('\n'.join(lines))
+
+    def _publish_path_corridor(self) -> None:
+        """Publish MPC corridor bounds as cross-track slats (LINE_LIST) in RViz2.
+
+        Each slat is a line segment from the left boundary (ub_sm, magenta) to
+        the right boundary (lb_sm, yellow) at each waypoint in the N-step horizon.
+        Using LINE_LIST so every pair of points is one independent segment —
+        this makes the pinch points immediately obvious without the lines
+        clashing with the white track-boundary lines.
+        """
+        import math
+        if self._mpc is None or not self._reference_path.waypoints:
+            return
+        wps = self._reference_path.waypoints
+        N = int(self._mpc_cfg.N)
+        start_id = self._mpc.model.wp_id
+        n_wps = len(wps)
+
+        left_pts: List[Point] = []
+        right_pts: List[Point] = []
+
+        for k in range(N):
+            wp = wps[(start_id + k) % n_wps]
+            if wp.ub_sm is None or wp.lb_sm is None:
+                continue
+            angle_ub = math.pi / 2 + wp.psi
+            angle_lb = -math.pi / 2 + wp.psi
+            # Left boundary (ub_sm = positive distance)
+            lx = wp.x + float(wp.ub_sm) * math.cos(angle_ub)
+            ly = wp.y + float(wp.ub_sm) * math.sin(angle_ub)
+            # Right boundary (lb_sm = negative distance → use angle_lb for symmetry)
+            rx = wp.x - float(wp.lb_sm) * math.cos(angle_lb)
+            ry = wp.y - float(wp.lb_sm) * math.sin(angle_lb)
+            left_pts.append(Point(x=lx, y=ly, z=0.3))
+            right_pts.append(Point(x=rx, y=ry, z=0.3))
+
+        # Build LINE_LIST: pairs (left[k], right[k]) = one transverse slat per waypoint
+        slats = Marker()
+        slats.header.frame_id = "map"
+        slats.header.stamp = self.get_clock().now().to_msg()
+        slats.ns = "mpc_corridor_slats"
+        slats.id = 0
+        slats.type = Marker.LINE_LIST
+        slats.action = Marker.ADD
+        slats.scale.x = 0.12   # line width in metres
+        slats.color = ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.85)  # bright yellow
+        slats.pose.orientation.w = 1.0
+        slats.lifetime.sec = 1
+        for lp, rp in zip(left_pts, right_pts):
+            slats.points.append(lp)  # type: ignore
+            slats.points.append(rp)  # type: ignore
+
+        # Left edge: magenta LINE_STRIP
+        left_strip = Marker()
+        left_strip.header.frame_id = "map"
+        left_strip.header.stamp = self.get_clock().now().to_msg()
+        left_strip.ns = "mpc_corridor_left"
+        left_strip.id = 1
+        left_strip.type = Marker.LINE_STRIP
+        left_strip.action = Marker.ADD
+        left_strip.scale.x = 0.15
+        left_strip.color = ColorRGBA(r=1.0, g=0.0, b=1.0, a=0.9)   # magenta = left
+        left_strip.pose.orientation.w = 1.0
+        left_strip.lifetime.sec = 1
+        left_strip.points = left_pts  # type: ignore
+
+        # Right edge: cyan LINE_STRIP
+        right_strip = Marker()
+        right_strip.header.frame_id = "map"
+        right_strip.header.stamp = self.get_clock().now().to_msg()
+        right_strip.ns = "mpc_corridor_right"
+        right_strip.id = 2
+        right_strip.type = Marker.LINE_STRIP
+        right_strip.action = Marker.ADD
+        right_strip.scale.x = 0.15
+        right_strip.color = ColorRGBA(r=0.0, g=1.0, b=1.0, a=0.9)  # cyan = right
+        right_strip.pose.orientation.w = 1.0
+        right_strip.lifetime.sec = 1
+        right_strip.points = right_pts  # type: ignore
+
+        ma = MarkerArray()
+        ma.markers = [slats, left_strip, right_strip]  # type: ignore
+        self._corridor_pub.publish(ma)
+
+    def _publish_dynamic_obstacles(self) -> None:
+        """Publish dynamic V2X obstacle blobs as orange CYLINDER markers in RViz2."""
+        ma = MarkerArray()
+        # Clear previous markers
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        ma.markers.append(clear)  # type: ignore
+
+        for i, ob in enumerate(self._dynamic_obstacles):
+            m = Marker()
+            m.header.frame_id = "map"
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = "v2x_obstacle_blobs"
+            m.id = i
+            m.type = Marker.CYLINDER
+            m.action = Marker.ADD
+            m.pose.position.x = float(ob.cx)
+            m.pose.position.y = float(ob.cy)
+            m.pose.position.z = 0.5
+            m.pose.orientation.w = 1.0
+            m.scale.x = float(ob.radius) * 2
+            m.scale.y = float(ob.radius) * 2
+            m.scale.z = 1.0
+            m.color = ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.7)  # orange
+            m.lifetime.sec = 1
+            ma.markers.append(m)  # type: ignore
+
+        self._dyn_obs_pub.publish(ma)
+
+    def _publish_v2x_status(self) -> None:
+        """Publish a floating text marker showing V2X gate state near the ego kart."""
+        if self._odom is None or self._mpc is None:
+            return
+        ma = MarkerArray()
+        txt = Marker()
+        txt.header.frame_id = "map"
+        txt.header.stamp = self.get_clock().now().to_msg()
+        txt.ns = "v2x_status_text"
+        txt.id = 0
+        txt.type = Marker.TEXT_VIEW_FACING
+        txt.action = Marker.ADD
+        txt.pose.position.x = self._odom.pose.pose.position.x
+        txt.pose.position.y = self._odom.pose.pose.position.y
+        txt.pose.position.z = 4.0   # float 4 m above the kart
+        txt.pose.orientation.w = 1.0
+        txt.scale.z = 1.2
+        txt.lifetime.sec = 1
+        if self._v2x_avoidance_active:
+            # Find nearest opponent ds for the status string
+            ego_wp_id = self._mpc.model.wp_id
+            ego_s = self._waypoint_s[min(ego_wp_id, len(self._waypoint_s) - 1)]
+            min_ds = self._v2x_deactivation_dist + 1.0
+            nearest_vid = "?"
+            for v in getattr(self, '_last_v2x_msg', type('_Empty', (), {'vehicles': []})()).vehicles:
+                opp_x, opp_y = float(v.position.x), float(v.position.y)
+                dxy = self._waypoint_xy - np.array([opp_x, opp_y], dtype=np.float64)
+                dists_sq = np.einsum('ij,ij->i', dxy, dxy)
+                nearest_wp = int(np.argmin(dists_sq))
+                if np.sqrt(dists_sq[nearest_wp]) < 0.8:
+                    continue
+                ds = (self._waypoint_s[nearest_wp] - ego_s) % self._total_track_s
+                if ds < min_ds:
+                    min_ds = ds
+                    nearest_vid = v.vehicle_id
+            gain = self._overtaking_steer_gain
+            txt.text = f"V2X: ACTIVE | {nearest_vid} @ {min_ds:.0f}m | steer={gain:.1f}"
+            txt.color = ColorRGBA(r=1.0, g=0.3, b=0.0, a=1.0)  # orange-red
+        else:
+            n_obs = len(self._dynamic_obstacles)
+            state = self._recovery_state if hasattr(self, '_recovery_state') else "?"
+            txt.text = f"V2X: monitoring | obs={n_obs} | {state}"
+            txt.color = ColorRGBA(r=0.6, g=0.6, b=0.6, a=1.0)  # grey
+        ma.markers.append(txt)  # type: ignore
+        self._v2x_status_pub.publish(ma)
 
     def _publish_mpc_pred_marker(self, x_pred, y_pred):
         pred_marker_array = MarkerArray()
@@ -1009,6 +1235,19 @@ class MPCController(Node):
             self._mpc_cfg.steering_tire_angle_gain_var = current_gain
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / current_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
+
+        # --- Prediction marker color reflects current driving state ---
+        # This works regardless of USE_BUG_ACC:
+        #   RED    = actively recovering from wall (reversing)
+        #   YELLOW = V2X overtaking mode is active (navigating around opponent)
+        #   CYAN   = normal forward driving
+        if self._dbg_pred_colors:
+            if self._recovery_state == "RECOVERING":
+                self._pred_marker_color = RED
+            elif self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
+                self._pred_marker_color = YELLOW
+            else:
+                self._pred_marker_color = CYAN
 
         # Temporarily suppress obstacle avoidance inside the MPC solver when we are in
         # recovery, cooldown, or essentially stopped (|v| < 0.5 km/h). In those states
@@ -1185,6 +1424,13 @@ class MPCController(Node):
         # 約 0.25 秒ごとに予測結果を表示
         if (self._mpc.current_prediction is not None) and (self._loop % (self._mpc_cfg.control_rate // 4) == 0):
             self._publish_mpc_pred_marker(self._mpc.current_prediction[0], self._mpc.current_prediction[1]) # type: ignore
+            if self.USE_OBSTACLE_AVOIDANCE:
+                if self._dbg_corridor:
+                    self._publish_path_corridor()
+                if self._dbg_dyn_obstacles:
+                    self._publish_dynamic_obstacles()
+                if self._dbg_v2x_status_text:
+                    self._publish_v2x_status()
 
     def run(self) -> None:
         self._wait_until_clock_received()
@@ -1197,8 +1443,11 @@ class MPCController(Node):
         self._car.update_states(pose.x, pose.y, pose.theta)
         self._car.update_reference_path(self._car.reference_path)
 
-        if self._ref_vel_configulator is None:
-            self._publish_ref_path_marker(self._car.reference_path)
+        # Always publish ref path at startup — latching QoS (TRANSIENT_LOCAL) delivers
+        # it to RViz2 even if RViz2 subscribes after the node starts.
+        # Previously this was gated on `_ref_vel_configulator is None`, which broke it
+        # when use_csv_velocity=false.
+        self._publish_ref_path_marker(self._car.reference_path)
 
         self._pred_marker_color = CYAN
 
