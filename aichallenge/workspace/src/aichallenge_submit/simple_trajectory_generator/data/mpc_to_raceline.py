@@ -18,9 +18,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 INPUT_CSV = os.path.join(
     SCRIPT_DIR,
-    "../../../aichallenge_submit/multi_purpose_mpc_ros/env/final_ver3/mincurv.csv"
+    "../../../aichallenge_submit/multi_purpose_mpc_ros/env/preliminary/optimized_traj_mincurv.csv"
 )
-OUTPUT_CSV = os.path.join(SCRIPT_DIR, "raceline_mincurv.csv")
+OUTPUT_CSV = os.path.join(SCRIPT_DIR, "raceline_optimized_traj_mincurv.csv")
 
 # Z height of the track (match existing raceline files)
 Z_HEIGHT = 6.5

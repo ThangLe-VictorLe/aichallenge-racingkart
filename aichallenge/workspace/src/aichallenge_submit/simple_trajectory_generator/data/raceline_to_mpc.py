@@ -29,18 +29,20 @@ import os
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DEFAULT_INPUT  = os.path.join(SCRIPT_DIR, "raceline_mincurv_edit.csv")
+DEFAULT_INPUT  = os.path.join(SCRIPT_DIR, "raceline_awsim_30km_from_garage.csv")
 DEFAULT_OUTPUT = os.path.join(
     SCRIPT_DIR,
-    "../../../aichallenge_submit/multi_purpose_mpc_ros/env/final_ver3/"
-    "mincurv_edit.csv"
+    "../../multi_purpose_mpc_ros/env/final_ver3/"
+    "traj_awsim_30km_from_garage.csv"
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def quat_to_psi(qz: float, qw: float) -> float:
-    """Convert a yaw-only quaternion (qx=qy=0) to heading angle [rad]."""
-    return 2.0 * math.atan2(qz, qw)
+def quat_to_psi(qx: float, qy: float, qz: float, qw: float) -> float:
+    """Convert quaternion to yaw heading angle [rad]."""
+    siny_cosp = 2.0 * (qw * qz + qx * qy)
+    cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 
 def compute_arc_length(points):
@@ -108,6 +110,19 @@ def compute_acceleration(vx, s_vals):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def get_val(row, *keys, default=None):
+    """Extract float value trying multiple potential header names."""
+    for k in keys:
+        if k in row and row[k] is not None and str(row[k]).strip() != "":
+            try:
+                return float(row[k])
+            except ValueError:
+                pass
+    if default is not None:
+        return float(default)
+    raise KeyError(f"None of keys {keys} found in CSV row headers: {list(row.keys())}")
+
+
 def main():
     input_csv  = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_INPUT
     output_csv = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_OUTPUT
@@ -127,15 +142,31 @@ def main():
         print("ERROR: Input file is empty.")
         sys.exit(1)
 
-    # 2. Parse fields
-    points  = [(float(r["x"]), float(r["y"])) for r in rows]
-    speeds  = [float(r["speed"])              for r in rows]
-    qz_list = [float(r["qz"])                 for r in rows]
-    qw_list = [float(r["qw"])                 for r in rows]
+    # 2. Parse fields with alias support
+    points  = [(get_val(r, "x", "x_m"), get_val(r, "y", "y_m")) for r in rows]
+    speeds  = [get_val(r, "speed", "vx_mps", "vx", "v") for r in rows]
+    qx_list = [get_val(r, "qx", "x_quat", default=0.0) for r in rows]
+    qy_list = [get_val(r, "qy", "y_quat", default=0.0) for r in rows]
+    qz_list = [get_val(r, "qz", "z_quat", default=0.0) for r in rows]
+    qw_list = [get_val(r, "qw", "w_quat", default=1.0) for r in rows]
 
     # 3. Derived quantities
-    s_vals     = compute_arc_length(points)
-    psi_vals   = [quat_to_psi(qz_list[i], qw_list[i]) for i in range(len(rows))]
+    s_vals = compute_arc_length(points)
+
+    if all(qx == 0.0 and qy == 0.0 and qz == 0.0 and qw == 1.0 for qx, qy, qz, qw in zip(qx_list, qy_list, qz_list, qw_list)):
+        # Fallback to point-to-point geometry heading if quaternions are identity / missing
+        n = len(points)
+        psi_vals = []
+        for i in range(n):
+            if i < n - 1:
+                dx = points[i + 1][0] - points[i][0]
+                dy = points[i + 1][1] - points[i][1]
+            else:
+                dx = points[i][0] - points[i - 1][0]
+                dy = points[i][1] - points[i - 1][1]
+            psi_vals.append(math.atan2(dy, dx))
+    else:
+        psi_vals = [quat_to_psi(qx_list[i], qy_list[i], qz_list[i], qw_list[i]) for i in range(len(rows))]
     kappa_vals = compute_curvature(points, s_vals)
     ax_vals    = compute_acceleration(speeds, s_vals)
 
