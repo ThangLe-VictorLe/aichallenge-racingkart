@@ -498,8 +498,11 @@ class MPCController(Node):
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
             self._static_obstacles: List[Obstacle] = create_obstacles()
+            if self._static_obstacles:
+                self._map.add_obstacles(self._static_obstacles)
+            self._map.save_static_map()
             self._dynamic_obstacles: List[Obstacle] = []
-            self._obstacles_updated = bool(self._static_obstacles)
+            self._obstacles_updated = False
             v2x_cfg = self._cfg.v2x_obstacle_avoidance  # type: ignore
             self._v2x_tracker = V2XVehicleTracker(
                 v_max_safety=float(v2x_cfg.v_max_safety),
@@ -532,6 +535,10 @@ class MPCController(Node):
             self._overtaking_steer_gain = float(v2x_cfg.overtaking_steer_gain)  # type: ignore
             # Runtime state
             self._v2x_avoidance_active = False
+            # Minimum time (seconds) the V2X active state must hold before it can flip again.
+            # Set to 2.0s to prevent premature deactivation when ego is stopped near opponent.
+            self._v2x_min_dwell_sec = 5.0
+            self._v2x_last_state_change_time: Optional[float] = None
 
         # --- Debug Visualization ---
         # Read debug_visualization section from config (all flags default to False).
@@ -779,13 +786,24 @@ class MPCController(Node):
             if 0.0 < ds <= deactivate_threshold:
                 any_opponent_in_deactivate_range = True
 
-        # Apply hysteresis: activate on close approach, deactivate only when all clear
+        # Apply hysteresis: activate on close approach, deactivate only when all clear.
+        # Additionally enforce a minimum dwell time to prevent wp_id jitter from toggling
+        # the state multiple times per second.
         prev_active = self._v2x_avoidance_active
+        now_wall = self.get_clock().now().nanoseconds / 1e9
+        dwell_elapsed = (
+            (now_wall - self._v2x_last_state_change_time) >= self._v2x_min_dwell_sec
+            if self._v2x_last_state_change_time is not None else True
+        )
+        desired_active = prev_active  # default: hold current
         if any_opponent_in_activate_range:
-            self._v2x_avoidance_active = True
+            desired_active = True
         elif not any_opponent_in_deactivate_range:
-            self._v2x_avoidance_active = False
-        # else: opponent is between activate and deactivate thresholds — hold current state
+            desired_active = False
+        # Only flip if the minimum dwell period has elapsed
+        if desired_active != prev_active and dwell_elapsed:
+            self._v2x_avoidance_active = desired_active
+            self._v2x_last_state_change_time = now_wall
 
         if self._v2x_avoidance_active != prev_active:
             if self._v2x_avoidance_active:
@@ -802,11 +820,13 @@ class MPCController(Node):
 
         if self._v2x_avoidance_active:
             predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
-            self._dynamic_obstacles = predictions_to_obstacles(
-                predictions, self._v2x_vehicle_radius)
-            # Always trigger map update so the corridor reflects the opponent's current
-            # position regardless of recovery state or vehicle speed.
-            self._obstacles_updated = True
+            new_dynamic = predictions_to_obstacles(predictions, self._v2x_vehicle_radius)
+            # Only trigger a map rebuild if obstacle positions changed meaningfully (>0.1m).
+            # This prevents continuous corridor redraw on every V2X callback when the
+            # opponent is stationary or barely moving (e.g. ego kart stopped in manual mode).
+            if self._obstacles_changed(new_dynamic):
+                self._dynamic_obstacles = new_dynamic
+                self._obstacles_updated = True
         else:
             # Opponent left range — clear dynamic obstacles so map resets to clean static corridor
             if self._dynamic_obstacles:
@@ -830,6 +850,22 @@ class MPCController(Node):
             if np.min(np.einsum('ij,ij->i', dxy, dxy)) <= thr_sq:
                 kept.append(ob)
         return kept
+
+    def _obstacles_changed(self, new_obstacles: List[Obstacle], threshold: float = 0.1) -> bool:
+        """Return True if the new obstacle list differs meaningfully from the current one.
+
+        Compares list length and, if equal, the max displacement of any obstacle.
+        Prevents continuous map rebuilds when the opponent is stationary or barely moving.
+        """
+        old = self._dynamic_obstacles
+        if len(new_obstacles) != len(old):
+            return True
+        if not new_obstacles:
+            return False
+        for o_new, o_old in zip(new_obstacles, old):
+            if (o_new.cx - o_old.cx) ** 2 + (o_new.cy - o_old.cy) ** 2 > threshold ** 2:
+                return True
+        return False
 
     def _border_cells_callback(self, msg: BorderCells):
         self._reference_path.set_border_cells(
@@ -982,6 +1018,16 @@ class MPCController(Node):
         left_pts: List[Point] = []
         right_pts: List[Point] = []
 
+        # Use the waypoint nearest to the ego's actual world position as start,
+        # not mpc.model.wp_id which can jump forward past obstacles when the
+        # solver is confused, causing the corridor to skip the blocking section.
+        if self._odom is not None:
+            ego_x = self._odom.pose.pose.position.x
+            ego_y = self._odom.pose.pose.position.y
+            dxy = self._waypoint_xy - np.array([ego_x, ego_y], dtype=np.float64)
+            start_id = int(np.argmin(np.einsum('ij,ij->i', dxy, dxy)))
+        # else keep start_id = mpc.model.wp_id (set above)
+
         for k in range(N):
             wp = wps[(start_id + k) % n_wps]
             if wp.ub_sm is None or wp.lb_sm is None:
@@ -1120,7 +1166,28 @@ class MPCController(Node):
         ma.markers.append(txt)  # type: ignore
         self._v2x_status_pub.publish(ma)
 
-    def _publish_mpc_pred_marker(self, x_pred, y_pred):
+    def _publish_mpc_pred_marker(self, spatial_state_prediction):
+        if self._odom is None or self._mpc is None:
+            return
+
+        # Use the waypoint nearest to the ego's actual world position as start,
+        # preventing the prediction visual from jumping over the opponent
+        ego_x = self._odom.pose.pose.position.x
+        ego_y = self._odom.pose.pose.position.y
+        dxy = self._waypoint_xy - np.array([ego_x, ego_y], dtype=np.float64)
+        start_id = int(np.argmin(np.einsum('ij,ij->i', dxy, dxy)))
+
+        N = min(self._mpc_cfg.N, len(spatial_state_prediction))
+        
+        x_pred, y_pred = [], []
+        # First state is current state (n=0, 1 are handled implicitly in solver, but prediction array starts at n=0)
+        # N steps means n ranges from 0 to N. The original loop did range(2, N). We match that.
+        for n in range(2, N):
+            associated_waypoint = self._mpc.model.reference_path.get_waypoint(start_id + n)
+            predicted_temporal_state = self._mpc.model.s2t(associated_waypoint, spatial_state_prediction[n, :])
+            x_pred.append(predicted_temporal_state.x)
+            y_pred.append(predicted_temporal_state.y)
+
         pred_marker_array = MarkerArray()
         m_base = Marker()
         m_base.header.frame_id = "map"
@@ -1222,13 +1289,11 @@ class MPCController(Node):
         if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
             self._obstacles_updated = False
             self._map.reset_map()
-            if self._v2x_avoidance_active:
-                # Full obstacle avoidance: rasterize opponent predictions onto occupancy map
+            if self._v2x_avoidance_active and self._dynamic_obstacles:
+                # Layer dynamic opponent predictions onto the pre-rendered static map
                 filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
-                self._map.add_obstacles(self._static_obstacles + filtered_dynamic)
-            else:
-                # No active opponent: use only static track boundaries
-                self._map.add_obstacles(self._static_obstacles)
+                if filtered_dynamic:
+                    self._map.add_obstacles(filtered_dynamic)
             self._reference_path.reset_dynamic_constraints()
 
         is_colliding = False
@@ -1244,18 +1309,19 @@ class MPCController(Node):
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
-        if self._recovery_state == "RECOVERING":
+        # V2X overtaking steer gain takes priority ALWAYS, even during recovery/cooldown,
+        # so that overtaking corridor calculations are never disrupted by wall recovery mode.
+        if self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
+            self._mpc_cfg.steering_tire_angle_gain_var = self._overtaking_steer_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._overtaking_steer_gain
+            self._mpc.update_max_steering_rate(scaled_steer_rate_max)
+        elif self._recovery_state == "RECOVERING":
             self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._recovery_steer_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         elif self._recovery_state == "COOLDOWN":
             self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._post_recovery_steer_gain
-            self._mpc.update_max_steering_rate(scaled_steer_rate_max)
-        elif self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
-            # Override per-waypoint steer gain with fixed overtaking gain while opponent is close
-            self._mpc_cfg.steering_tire_angle_gain_var = self._overtaking_steer_gain
-            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._overtaking_steer_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         elif self._steer_gain_configurator is not None:
             current_gain = self._steer_gain_configurator.get_steer_gain(self._mpc.model.wp_id, interpolate=True)
@@ -1264,18 +1330,72 @@ class MPCController(Node):
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
 
         # --- Prediction marker color reflects current driving state ---
-        # This works regardless of USE_BUG_ACC:
-        #   RED    = actively recovering from wall (reversing)
-        #   YELLOW = V2X overtaking mode is active (navigating around opponent)
+        # V2X (YELLOW) always takes display priority over recovery (RED).
+        #   RED    = actively recovering from wall (reversing, no V2X)
+        #   YELLOW = V2X overtaking mode is active (always shown when V2X on)
         #   CYAN   = normal forward driving
         if self._dbg_pred_colors:
-            if self._recovery_state == "RECOVERING":
-                self._pred_marker_color = RED
-            elif self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
+            if self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
                 self._pred_marker_color = YELLOW
+            elif self._recovery_state == "RECOVERING":
+                self._pred_marker_color = RED
             else:
                 self._pred_marker_color = CYAN
 
+
+        # === CORRIDOR CHECK (must come BEFORE get_control()) ===
+        # Compute corridor width first. If too narrow, issue a direct ackermann stop
+        # and return immediately — never let the MPC solver run in this case, because
+        # the solver will produce high acceleration that the rest of the loop can't override.
+        min_corridor_width = (self._car.width + 0.2) if (hasattr(self, '_car') and self._car is not None) else (self._cfg.bicycle_model.width + 0.2)
+        curr_width_val = self._compute_corridor_width_at_ego()
+        corridor_is_too_narrow = bool(curr_width_val < min_corridor_width) if self.USE_OBSTACLE_AVOIDANCE else False
+
+        if corridor_is_too_narrow:
+            if self._recovery_state != "NARROW":
+                self._recovery_state = "NARROW"
+                self.get_logger().warn(
+                    f"Corridor width ({curr_width_val:.2f}m) < min width ({min_corridor_width:.2f}m)!"
+                    " Switching to NARROW state — braking in REVERSE gear.",
+                    throttle_duration_sec=1.0
+                )
+                gear_msg = GearCommand()
+                gear_msg.stamp = self.get_clock().now().to_msg()
+                gear_msg.command = GearCommand.REVERSE
+                self._gear_pub.publish(gear_msg)
+
+            if self._dbg_pred_colors:
+                self._pred_marker_color = RED
+
+            # Compute braking acceleration: full brake if moving forward
+            if abs(v) > 0.1:
+                stop_u = np.array([abs(self._recovery_reverse_vel), self._last_u[1]])
+                stop_acc = self._mpc_cfg.a_max
+            else:
+                stop_u = np.array([0.0, self._last_u[1]])
+                stop_acc = 0.0
+
+            stop_acc = self._last_acc + (stop_acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
+            self._last_acc = stop_acc
+            self._last_u[0] = stop_u[0]
+            self._car.drive([v, self._last_u[1]])
+            self._publish_control_command(now, stop_u, stop_acc, False)
+            self._sim_logger.log(self._car, stop_u, t)
+            self._sim_logger.plot_animation(t, self._loop, self._current_laps, self._lap_times, is_colliding, stop_u, self._mpc, self._car)
+            return
+        else:
+            if self._recovery_state == "NARROW":
+                self.get_logger().info("Corridor is wide enough. Exiting NARROW state, resuming NORMAL driving.")
+                self._recovery_state = "NORMAL"
+                # Reset MPC state to warm start correctly
+                self._mpc.previous_steering = self._last_u[1]
+                self._mpc.infeasibility_counter = 0
+                self._mpc.current_prediction = None
+                
+                gear_msg = GearCommand()
+                gear_msg.stamp = self.get_clock().now().to_msg()
+                gear_msg.command = GearCommand.DRIVE
+                self._gear_pub.publish(gear_msg)
 
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
@@ -1300,18 +1420,8 @@ class MPCController(Node):
 
         # Dynamically retrieve vehicle width from bicycle_model (from config.yaml or parameter updates)
         # (prevents kart from trying to squeeze through gaps narrower than the configured vehicle width)
-        min_corridor_width = self._car.width if (hasattr(self, '_car') and self._car is not None) else self._cfg.bicycle_model.width
-
-        # Read corridor width directly from dynamic path constraints — NOT from self._mpc.current_ub/lb.
-        # self._mpc.current_ub/lb only updates while the solver runs with OA enabled, which is suppressed
-        # when the kart is stopped (abs(v) < 0.5 km/h). The path constraints array is updated by the
-        # map rebuild above (including the forced periodic rebuild), so it reflects the opponent's
-        # position correctly even while stationary.
-        curr_width_val = self._compute_corridor_width_at_ego()
-        corridor_is_too_narrow = bool(curr_width_val < min_corridor_width) if self.USE_OBSTACLE_AVOIDANCE else False
-
-        if corridor_is_too_narrow:
-            u[0] = 0.0
+        # NOTE: If we reach this line, corridor_is_too_narrow was False (we already returned above if True).
+        corridor_is_too_narrow = False  # satisfies recovery state-machine reference below
 
         # override by brake command if control is disabled
         if not self._enable_control:
@@ -1379,7 +1489,11 @@ class MPCController(Node):
 
                     # u[0] is in km/h; v is in m/s. Stuck = forward commanded (u[0] > 3.6 km/h) but not moving.
                     # Only trigger after kart has actually moved at least once.
-                    if self._has_moved and u[0] > 3.6 and abs(v) < self._recovery_stuck_vel_threshold:
+                    # Suppress when V2X is active (intentional stop for overtaking),
+                    # corridor is too narrow (kart waiting for gap), or control is disabled (manual).
+                    v2x_suppressed = self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active
+                    if self._has_moved and u[0] > 3.6 and abs(v) < self._recovery_stuck_vel_threshold \
+                            and not v2x_suppressed and not corridor_is_too_narrow and self._enable_control:
                         if self._stuck_start_time is None:
                             self._stuck_start_time = now_sec
                             self.get_logger().warn("Stuck timer started...", throttle_duration_sec=1.0)
@@ -1459,8 +1573,8 @@ class MPCController(Node):
         self._sim_logger.plot_animation(t, self._loop, self._current_laps, self._lap_times, is_colliding, u, self._mpc, self._car)
 
         # 約 0.25 秒ごとに予測結果を表示
-        if (self._mpc.current_prediction is not None) and (self._loop % (self._mpc_cfg.control_rate // 4) == 0):
-            self._publish_mpc_pred_marker(self._mpc.current_prediction[0], self._mpc.current_prediction[1]) # type: ignore
+        if hasattr(self._mpc, 'current_prediction_raw') and (self._loop % (self._mpc_cfg.control_rate // 4) == 0):
+            self._publish_mpc_pred_marker(self._mpc.current_prediction_raw) # type: ignore
             if self.USE_OBSTACLE_AVOIDANCE:
                 if self._dbg_corridor:
                     self._publish_path_corridor()

@@ -42,8 +42,6 @@ Visualization Manager:
               Value: true
             camera_optical_link:
               Value: true
-            gnss_base_link:
-              Value: true
             gnss_link:
               Value: true
             imu_link:
@@ -65,20 +63,6 @@ Visualization Manager:
           Show Names: true
           Tree:
             map:
-              base_link:
-                camera_link:
-                  camera_optical_link:
-                    {}
-                lidar_base_link:
-                  lidar:
-                    {}
-                sensor_kit_base_link:
-                  gnss_link:
-                    {}
-                  imu_link:
-                    {}
-              gnss_base_link:
-                {}
               viewer:
                 {}
           Update Interval: 0.029999999329447746
@@ -486,7 +470,7 @@ Visualization Manager:
           Enabled: true
           Name: MPC prediction
           Namespaces:
-            mpc_pred: true
+            {}
           Topic:
             Depth: 5
             Durability Policy: Volatile
@@ -546,7 +530,7 @@ Visualization Manager:
           Enabled: true
           Name: VehicleMarkers
           Namespaces:
-            v2x_vehicles: true
+            {}
           Topic:
             Depth: 5
             Durability Policy: Volatile
@@ -569,7 +553,7 @@ Visualization Manager:
       Enabled: true
       Name: ref_path
       Namespaces:
-        ref_path: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -581,7 +565,7 @@ Visualization Manager:
       Enabled: true
       Name: Dynamic obstacles
       Namespaces:
-        v2x_obstacle_blobs: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -593,9 +577,7 @@ Visualization Manager:
       Enabled: true
       Name: Path corridor
       Namespaces:
-        mpc_corridor_left: true
-        mpc_corridor_right: true
-        mpc_corridor_slats: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -607,7 +589,7 @@ Visualization Manager:
       Enabled: true
       Name: v2x status
       Namespaces:
-        v2x_status_text: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -653,11 +635,11 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 23.49549102783203
+      Scale: 17.727073669433594
       Target Frame: viewer
       Value: TopDownOrtho (rviz)
-      X: -2.7305216789245605
-      Y: -13.629829406738281
+      X: 4.640629768371582
+      Y: -5.005117893218994
     Saved:
       - Class: rviz_default_plugins/ThirdPersonFollower
         Distance: 18

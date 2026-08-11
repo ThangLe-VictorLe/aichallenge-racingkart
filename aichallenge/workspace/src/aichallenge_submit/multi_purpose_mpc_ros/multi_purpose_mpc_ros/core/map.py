@@ -90,6 +90,7 @@ class Map:
         self.boundaries = list()
 
         self.data_backup = self.data.copy()
+        self.static_data = self.data.copy()
 
     def w2m(self, x, y):
         """
@@ -135,8 +136,19 @@ class Map:
         self.data = remove_small_holes(self.data, area_threshold=5,
                                        connectivity=8).astype(np.int8)
 
+    def save_static_map(self):
+        """
+        Freeze the current map (containing track boundaries and static obstacles)
+        as the permanent static reference map.
+        """
+        self.static_data = self.data.copy()
+
     def reset_map(self):
-        self.data = self.data_backup.copy()
+        """
+        Reset map data back to the frozen static map state.
+        Clears dynamic obstacle objects list.
+        """
+        self.data = self.static_data.copy()
         self.obstacles = list()
 
     def add_obstacles(self, obstacles):

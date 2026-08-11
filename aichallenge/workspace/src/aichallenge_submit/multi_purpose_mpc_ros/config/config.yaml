@@ -41,7 +41,7 @@ bicycle_model:
 mpc:
   use_csv_velocity: false
   use_dynamic_steer_gain: false
-  N: 15
+  N: 18
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
@@ -109,7 +109,7 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 1.2           # [m] clearance radius around opponent kart
+  vehicle_radius: 1.4           # [m] clearance radius around opponent kart
   v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
   position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
 
@@ -131,7 +131,7 @@ recovery:
   stuck_vel_threshold_kmh: 0.3   # [km/h] threshold to consider vehicle stuck
   stuck_time_sec: 0.5            # [s] seconds stuck before triggering recovery
   reverse_vel_kmh: -5.0          # [km/h] speed when reversing out
-  reverse_time_sec: 4.0          # [s] duration to reverse
+  reverse_time_sec: 6.0          # [s] duration to reverse
   recovery_steer_gain: 2.0       # fixed steer gain override during recovery
   post_recovery_steer_gain: 2.0  # fixed steer gain override AFTER recovery (during cooldown)
   cooldown_sec: 6.0              # [s] cooldown duration after recovery finishes
