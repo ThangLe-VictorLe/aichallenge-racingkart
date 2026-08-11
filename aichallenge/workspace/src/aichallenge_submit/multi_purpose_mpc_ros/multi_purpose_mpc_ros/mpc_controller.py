@@ -252,6 +252,7 @@ class MPCController(Node):
             self.declare_parameter("accel_low_pass_gain", mpc_cfg.accel_low_pass_gain)
             self.declare_parameter("steer_low_pass_gain", mpc_cfg.steer_low_pass_gain)
             self.declare_parameter("wp_id_offset", mpc_cfg.wp_id_offset)
+            self.declare_parameter("bicycle_model_width", self._cfg.bicycle_model.width)
 
         def param_cb(parameters):
             cfg_mpc = self._cfg.mpc # type: ignore
@@ -295,7 +296,6 @@ class MPCController(Node):
                 elif param.name == "Q2" and param.type_ == Parameter.Type.DOUBLE:
                     update_Q(2, param.value)
 
-
                 elif param.name == "R0" and param.type_ == Parameter.Type.DOUBLE:
                     update_R(0, param.value)
                 elif param.name == "R1" and param.type_ == Parameter.Type.DOUBLE:
@@ -325,6 +325,14 @@ class MPCController(Node):
                     mpc_cfg.wp_id_offset = param.value
                     self._mpc.update_wp_id_offset(param.value)
                     self.get_logger().warn(f"wp_id_offset was updated to '{param.value}'")
+
+                elif param.name in ("bicycle_model_width", "bicycle_model.width") and param.type_ == Parameter.Type.DOUBLE:
+                    self._cfg.bicycle_model.width = param.value
+                    if hasattr(self, '_car') and self._car is not None:
+                        self._car.width = param.value
+                    if hasattr(self, '_mpc') and self._mpc is not None and hasattr(self._mpc, 'model') and self._mpc.model is not None:
+                        self._mpc.model.width = param.value
+                    self.get_logger().warn(f"bicycle_model.width was updated to '{param.value}' [m]")
 
 
             return SetParametersResult(successful=True)
@@ -796,9 +804,9 @@ class MPCController(Node):
             predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
             self._dynamic_obstacles = predictions_to_obstacles(
                 predictions, self._v2x_vehicle_radius)
-            # Only trigger map update if not in recovery — wall proximity makes solver infeasible
-            if self._recovery_state not in ("RECOVERING", "COOLDOWN"):
-                self._obstacles_updated = True
+            # Always trigger map update so the corridor reflects the opponent's current
+            # position regardless of recovery state or vehicle speed.
+            self._obstacles_updated = True
         else:
             # Opponent left range — clear dynamic obstacles so map resets to clean static corridor
             if self._dynamic_obstacles:
@@ -896,6 +904,25 @@ class MPCController(Node):
     def _wait_until_path_constraints_received(self, timeout: float = 30.) -> None:
         if self.USE_OBSTACLE_AVOIDANCE and self._cfg.reference_path.use_path_constraints_topic: # type: ignore
             self._wait_until_message_received(lambda: self._reference_path.path_constraints, 'path constraints', timeout)
+
+    def _compute_corridor_width_at_ego(self) -> float:
+        """Return the minimum corridor width (ub - lb) across the current MPC horizon
+        at the ego waypoint, reading dynamic path constraints directly.
+        This is independent of the MPC solver's use_obstacle_avoidance flag so it
+        works correctly even when the solver has OA suppressed (e.g. while stopped)."""
+        try:
+            pc = self._reference_path.path_constraints
+            if pc is None or len(pc) < 2:
+                return float('inf')  # no constraints yet — safe fallback
+            ub_all = pc[0]  # shape: (n_waypoints, N)
+            lb_all = pc[1]
+            wp_id = (self._mpc.model.wp_id + 1) % len(ub_all)
+            ub_row = ub_all[wp_id]  # array of length N
+            lb_row = lb_all[wp_id]
+            widths = ub_row - lb_row
+            return float(np.min(widths))  # most restrictive point in the horizon
+        except Exception:
+            return float('inf')  # safe fallback: do not trigger stop
 
     # =========================================================================
     # Debug Visualization Helpers
@@ -1191,16 +1218,16 @@ class MPCController(Node):
                 sys.exit(1)
             # plot_reference_path(self._car)
 
+
         if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
             self._obstacles_updated = False
             self._map.reset_map()
-            if self._v2x_avoidance_active and self._recovery_state == "NORMAL":
+            if self._v2x_avoidance_active:
                 # Full obstacle avoidance: rasterize opponent predictions onto occupancy map
                 filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
                 self._map.add_obstacles(self._static_obstacles + filtered_dynamic)
             else:
-                # No active opponent or in recovery: use only static track boundaries
-                # (prevents solver infeasibility from near-wall positions during recovery)
+                # No active opponent: use only static track boundaries
                 self._map.add_obstacles(self._static_obstacles)
             self._reference_path.reset_dynamic_constraints()
 
@@ -1249,26 +1276,10 @@ class MPCController(Node):
             else:
                 self._pred_marker_color = CYAN
 
-        # Temporarily suppress obstacle avoidance inside the MPC solver when we are in
-        # recovery, cooldown, or essentially stopped (|v| < 0.5 km/h). In those states
-        # the kart is near a wall and update_path_constraints returns empty/infeasible
-        # segments, which freeze the solver (u=[0,0]). Falling back to pre-computed
-        # static bounds gives the same fast, stable behaviour as use_obstacle_avoidance=False.
-        _suppress_obs_avoidance = (
-            self.USE_OBSTACLE_AVOIDANCE and (
-                self._recovery_state in ("RECOVERING", "COOLDOWN")
-                or abs(v) < 0.5 / 3.6  # < 0.5 km/h  ≈ nearly stopped
-            )
-        )
-        if _suppress_obs_avoidance:
-            self._mpc.use_obstacle_avoidance = False
 
         with self._stats.time_block("control"):
             u, max_delta = self._mpc.get_control()
             # self.get_logger().info(f"u: {u}")
-
-        if _suppress_obs_avoidance:
-            self._mpc.use_obstacle_avoidance = True
 
         if self._mpc_cfg.use_csv_velocity:
             # We use the interpolated vx_mps from the CSV (stored in wp.v_ref)
@@ -1287,6 +1298,21 @@ class MPCController(Node):
                 v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
                 self._reference_path.set_v_ref(v_ref)
 
+        # Dynamically retrieve vehicle width from bicycle_model (from config.yaml or parameter updates)
+        # (prevents kart from trying to squeeze through gaps narrower than the configured vehicle width)
+        min_corridor_width = self._car.width if (hasattr(self, '_car') and self._car is not None) else self._cfg.bicycle_model.width
+
+        # Read corridor width directly from dynamic path constraints — NOT from self._mpc.current_ub/lb.
+        # self._mpc.current_ub/lb only updates while the solver runs with OA enabled, which is suppressed
+        # when the kart is stopped (abs(v) < 0.5 km/h). The path constraints array is updated by the
+        # map rebuild above (including the forced periodic rebuild), so it reflects the opponent's
+        # position correctly even while stationary.
+        curr_width_val = self._compute_corridor_width_at_ego()
+        corridor_is_too_narrow = bool(curr_width_val < min_corridor_width) if self.USE_OBSTACLE_AVOIDANCE else False
+
+        if corridor_is_too_narrow:
+            u[0] = 0.0
+
         # override by brake command if control is disabled
         if not self._enable_control:
             last_v_cmd = self._last_u[0]
@@ -1303,7 +1329,7 @@ class MPCController(Node):
 
         # Wall Recovery State Machine
         is_recovering = False
-        if self._recovery_enabled and self._enable_control:
+        if self._recovery_enabled and self._enable_control and not corridor_is_too_narrow:
             now_sec = t
 
             if self._recovery_state == "RECOVERING":
@@ -1376,7 +1402,18 @@ class MPCController(Node):
 
         acc = 0.
         bug_acc_enabled = False
-        if is_recovering:
+        if corridor_is_too_narrow:
+            bug_acc_enabled = False
+            if abs(v) > 0.05:
+                acc = self._mpc_cfg.a_min
+            else:
+                acc = 0.0
+            self._pred_marker_color = RED
+            self.get_logger().warn(
+                f"Corridor width ({curr_width_val:.2f}m) < vehicle width ({min_corridor_width:.2f}m)! Decelerating to full stop.",
+                throttle_duration_sec=1.0
+            )
+        elif is_recovering:
             bug_acc_enabled = False
             # AWSIM: REVERSE gear + positive acc moves backward
             acc = self._mpc_cfg.a_max  # full forward acc in REVERSE gear = move backward

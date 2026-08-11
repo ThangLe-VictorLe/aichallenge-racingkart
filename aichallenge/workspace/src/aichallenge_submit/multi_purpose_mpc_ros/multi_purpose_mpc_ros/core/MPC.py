@@ -55,6 +55,8 @@ class MPC:
         self.infeasibility_counter = 0
         self.last_solved_wp_id = 0
         self.current_control = np.zeros((self.nu*self.N))
+        self.current_ub = None
+        self.current_lb = None
         self.optimizer = osqp.OSQP()
 
         if not self.use_obstacle_avoidance:
@@ -167,6 +169,9 @@ class MPC:
                 infeasible_index = ub < lb
                 ub[infeasible_index] = 0.0
                 lb[infeasible_index] = 0.0
+
+        self.current_ub = ub
+        self.current_lb = lb
 
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
