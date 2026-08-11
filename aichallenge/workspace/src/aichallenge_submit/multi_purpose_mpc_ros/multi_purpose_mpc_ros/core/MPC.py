@@ -291,6 +291,7 @@ class MPC:
             # 予測の更新
             self.current_control = control_signals
             x = np.reshape(dec.x[:(N+1)*nx], (N+1, nx))
+            self.current_prediction_raw = x
             self.current_prediction = self.update_prediction(x, N)
 
             u = np.array([v, delta])
