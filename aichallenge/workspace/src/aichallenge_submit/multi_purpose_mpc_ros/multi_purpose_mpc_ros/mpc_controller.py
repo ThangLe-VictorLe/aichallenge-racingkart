@@ -462,6 +462,9 @@ class MPCController(Node):
         self._car = create_car(self._reference_path)
         self._mpc_cfg, self._mpc = create_mpc(self._car)
         compute_speed_profile(self._car, self._mpc_cfg)
+        # Snapshot the baseline steer gain from config so it can be restored
+        # after overtaking or recovery overrides are released.
+        self._baseline_steer_gain = self._mpc_cfg.steering_tire_angle_gain_var
 
         if self.USE_OBSTACLE_AVOIDANCE:
             # Pre-build the static path constraints table so it is always available
@@ -502,7 +505,7 @@ class MPCController(Node):
             mpc_N = int(self._cfg.mpc.N)  # type: ignore
             t_horizon = mpc_N / float(self._cfg.mpc.control_rate)  # type: ignore
             self._v2x_t_samples = [
-                k * t_horizon / max(mpc_N - 1, 1) for k in range(mpc_N)
+                k * t_horizon / max(mpc_N - 1, 1) for k in range(0, mpc_N, 4)
             ]
             # コリドー外の V2X 障害物で MPC のコリドー狭窄/反転が起きないよう、
             # ref-path 近傍のみに絞り込む。閾値 = max_width/2 + vehicle_radius + 余白。
@@ -522,6 +525,16 @@ class MPCController(Node):
             self._v2x_activation_dist = float(v2x_cfg.activation_distance_m)  # type: ignore
             self._v2x_deactivation_dist = float(v2x_cfg.deactivation_distance_m)  # type: ignore
             self._overtaking_steer_gain = float(v2x_cfg.overtaking_steer_gain)  # type: ignore
+            _ot_inc = getattr(v2x_cfg, 'overtaking_steer_gain_increment', None)
+            self._overtaking_gain_increment = float(_ot_inc) if _ot_inc is not None else 0.0
+            _ot_max = getattr(v2x_cfg, 'overtaking_steer_gain_max', None)
+            self._overtaking_gain_max = float(_ot_max) if _ot_max is not None else None
+            # Accumulated overtaking gain runtime state.
+            # Increments each time overtaking fires right after a recovery cycle.
+            self._overtaking_cycle_count = 0
+            self._current_overtaking_steer_gain = self._overtaking_steer_gain
+            # Flag set whenever a recovery cycle completes, consumed when overtaking next activates.
+            self._post_recovery_overtake_pending = False
             # Runtime state
             self._v2x_avoidance_active = False
 
@@ -561,6 +574,9 @@ class MPCController(Node):
             self._recovery_steer_gain = float(getattr(recovery_cfg, 'recovery_steer_gain', 1.0))
             self._post_recovery_steer_gain = float(getattr(recovery_cfg, 'post_recovery_steer_gain', 1.0))
             self._recovery_cooldown_sec = float(getattr(recovery_cfg, 'cooldown_sec', 2.0))
+            self._post_recovery_gain_increment = float(getattr(recovery_cfg, 'post_recovery_steer_gain_increment', 0.0))
+            _max = getattr(recovery_cfg, 'post_recovery_steer_gain_max', None)
+            self._post_recovery_gain_max = float(_max) if _max is not None else None
             raw_disabled = getattr(recovery_cfg, 'disabled_waypoints', None)
             if raw_disabled is None:
                 raw_disabled = getattr(recovery_cfg, 'disabled_waypoint_ranges', None)
@@ -573,6 +589,8 @@ class MPCController(Node):
             self._recovery_steer_gain = 1.0
             self._post_recovery_steer_gain = 1.0
             self._recovery_cooldown_sec = 2.0
+            self._post_recovery_gain_increment = 0.0
+            self._post_recovery_gain_max = None
             raw_disabled = None
 
         self._recovery_disabled_ranges: List[Tuple[int, int]] = []
@@ -591,6 +609,12 @@ class MPCController(Node):
         self._stuck_start_time = None
         self._recovering_start_time = None
         self._cooldown_start_time = None
+        # Accumulated post-recovery steer gain counters.
+        # _recovery_cycle_count increments each time a full stuck cycle completes
+        # (RECOVERING → COOLDOWN).  _current_post_recovery_steer_gain tracks the
+        # effective (possibly elevated) gain for the current/next cooldown phase.
+        self._recovery_cycle_count = 0
+        self._current_post_recovery_steer_gain = self._post_recovery_steer_gain
         # Only allow stuck detection after the kart has moved at least once
         # (prevents false trigger at race start when v=0 but MPC commands speed)
         self._has_moved = False
@@ -781,9 +805,21 @@ class MPCController(Node):
 
         if self._v2x_avoidance_active != prev_active:
             if self._v2x_avoidance_active:
+                # Check if this activation follows a recovery — if so, accumulate the overtaking gain
+                if self._post_recovery_overtake_pending:
+                    self._post_recovery_overtake_pending = False
+                    self._overtaking_cycle_count += 1
+                    accumulated = self._overtaking_steer_gain + \
+                        self._overtaking_cycle_count * self._overtaking_gain_increment
+                    if self._overtaking_gain_max is not None:
+                        accumulated = min(accumulated, self._overtaking_gain_max)
+                    self._current_overtaking_steer_gain = accumulated
+                    self.get_logger().warn(
+                        f"[V2X] Overtaking cycle #{self._overtaking_cycle_count}: "
+                        f"overtaking_steer_gain -> {self._current_overtaking_steer_gain:.2f}")
                 self.get_logger().warn(
                     "[V2X] Overtaking mode ACTIVATED — opponent within "
-                    f"{activate_threshold:.0f} m ahead. Steer gain -> {self._overtaking_steer_gain}")
+                    f"{activate_threshold:.0f} m ahead. Steer gain -> {self._current_overtaking_steer_gain}")
             else:
                 self.get_logger().info(
                     "[V2X] Overtaking mode DEACTIVATED — no opponent within "
@@ -943,6 +979,11 @@ class MPCController(Node):
         Using LINE_LIST so every pair of points is one independent segment —
         this makes the pinch points immediately obvious without the lines
         clashing with the white track-boundary lines.
+
+        Both boundary strips always begin at the ego kart's world position so
+        the corridor is visually anchored to the car even when an obstacle is
+        very close ahead (which would otherwise leave a gap between the kart
+        and the first rendered waypoint).
         """
         import math
         if self._mpc is None or not self._reference_path.waypoints:
@@ -952,8 +993,14 @@ class MPCController(Node):
         start_id = self._mpc.model.wp_id
         n_wps = len(wps)
 
-        left_pts: List[Point] = []
-        right_pts: List[Point] = []
+        # Seed both strips at the ego kart's actual world position so the
+        # corridor always originates from the kart, not the first horizon wp.
+        ego_x = float(self._odom.pose.pose.position.x) if self._odom is not None else 0.0
+        ego_y = float(self._odom.pose.pose.position.y) if self._odom is not None else 0.0
+        ego_pt = Point(x=ego_x, y=ego_y, z=0.3)
+
+        left_pts: List[Point] = [ego_pt]
+        right_pts: List[Point] = [ego_pt]
 
         for k in range(N):
             wp = wps[(start_id + k) % n_wps]
@@ -1082,7 +1129,7 @@ class MPCController(Node):
                 if ds < min_ds:
                     min_ds = ds
                     nearest_vid = v.vehicle_id
-            gain = self._overtaking_steer_gain
+            gain = self._current_overtaking_steer_gain
             txt.text = f"V2X: ACTIVE | {nearest_vid} @ {min_ds:.0f}m | steer={gain:.1f}"
             txt.color = ColorRGBA(r=1.0, g=0.3, b=0.0, a=1.0)  # orange-red
         else:
@@ -1095,20 +1142,25 @@ class MPCController(Node):
 
     def _publish_mpc_pred_marker(self, x_pred, y_pred):
         pred_marker_array = MarkerArray()
-        m_base = Marker()
-        m_base.header.frame_id = "map"
-        m_base.ns = "mpc_pred"
-        m_base.type = Marker.SPHERE
-        m_base.action = Marker.ADD
-        m_base.pose.position.z = 0.0
-        m_base.scale = Vector3(x=0.5, y=0.5, z=0.5)
-        m_base.color = self._pred_marker_color
+        m = Marker()
+        m.header.frame_id = "map"
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = "mpc_pred"
+        m.id = 0
+        m.type = Marker.SPHERE_LIST
+        m.action = Marker.ADD
+        m.pose.orientation.w = 1.0
+        m.scale = Vector3(x=0.5, y=0.5, z=0.5)
+        m.color = self._pred_marker_color
+        
         for i in range(len(x_pred)):
-            m = copy.deepcopy(m_base)
-            m.id = i
-            m.pose.position.x = x_pred[i]
-            m.pose.position.y = y_pred[i]
-            pred_marker_array.markers.append(m) # type: ignore
+            p = Point()
+            p.x = x_pred[i]
+            p.y = y_pred[i]
+            p.z = 0.0
+            m.points.append(p) # type: ignore
+            
+        pred_marker_array.markers.append(m) # type: ignore
         self._mpc_pred_pub.publish(pred_marker_array)
         self._mpc_pred_pub_dummy.publish(pred_marker_array)
 
@@ -1222,18 +1274,29 @@ class MPCController(Node):
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._recovery_steer_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         elif self._recovery_state == "COOLDOWN":
-            self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
-            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._post_recovery_steer_gain
+            self._mpc_cfg.steering_tire_angle_gain_var = self._current_post_recovery_steer_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._current_post_recovery_steer_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         elif self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
             # Override per-waypoint steer gain with fixed overtaking gain while opponent is close
-            self._mpc_cfg.steering_tire_angle_gain_var = self._overtaking_steer_gain
-            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._overtaking_steer_gain
+            self._mpc_cfg.steering_tire_angle_gain_var = self._current_overtaking_steer_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._current_overtaking_steer_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         elif self._steer_gain_configurator is not None:
+            # Normal driving with per-waypoint dynamic gain
             current_gain = self._steer_gain_configurator.get_steer_gain(self._mpc.model.wp_id, interpolate=True)
             self._mpc_cfg.steering_tire_angle_gain_var = current_gain
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / current_gain
+            self._mpc.update_max_steering_rate(scaled_steer_rate_max)
+        else:
+            # Normal driving, fixed gain — always restore baseline so any previous
+            # overtaking/recovery override (e.g. overtaking_steer_gain) is cleared.
+            if self._mpc_cfg.steering_tire_angle_gain_var != self._baseline_steer_gain:
+                self.get_logger().info(
+                    f"[SteerGain] Restoring baseline gain "
+                    f"{self._mpc_cfg.steering_tire_angle_gain_var:.3f} -> {self._baseline_steer_gain:.3f}")
+            self._mpc_cfg.steering_tire_angle_gain_var = self._baseline_steer_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._baseline_steer_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
 
         # --- Prediction marker color reflects current driving state ---
@@ -1317,6 +1380,18 @@ class MPCController(Node):
                     self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
                 else:
                     self.get_logger().info("Wall recovery completed! Switching to DRIVE, resuming normal driving...")
+                    # Accumulate steer gain: each full recovery cycle adds the increment.
+                    self._recovery_cycle_count += 1
+                    accumulated = self._post_recovery_steer_gain + \
+                        self._recovery_cycle_count * self._post_recovery_gain_increment
+                    if self._post_recovery_gain_max is not None:
+                        accumulated = min(accumulated, self._post_recovery_gain_max)
+                    self._current_post_recovery_steer_gain = accumulated
+                    self.get_logger().info(
+                        f"[Recovery] Cycle #{self._recovery_cycle_count}: "
+                        f"post_recovery_steer_gain -> {self._current_post_recovery_steer_gain:.2f}")
+                    # Signal that the NEXT overtaking activation should bump the overtaking gain too.
+                    self._post_recovery_overtake_pending = True
                     self._recovery_state = "COOLDOWN"
                     self._cooldown_start_time = now_sec
                     self._stuck_start_time = None
@@ -1324,7 +1399,7 @@ class MPCController(Node):
                     self._last_u = np.array([0.0, 0.0])
                     self._last_acc = 0.0
                     self._car.update_reference_path(self._car.reference_path)
-                    self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
+                    self._mpc_cfg.steering_tire_angle_gain_var = self._current_post_recovery_steer_gain
                     # Shift back to DRIVE gear so forward motion resumes
                     gear_msg = GearCommand()
                     gear_msg.stamp = self.get_clock().now().to_msg()
@@ -1332,7 +1407,7 @@ class MPCController(Node):
                     self._gear_pub.publish(gear_msg)
 
             elif self._recovery_state == "COOLDOWN":
-                self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
+                self._mpc_cfg.steering_tire_angle_gain_var = self._current_post_recovery_steer_gain
                 if self._cooldown_start_time is not None and (now_sec - self._cooldown_start_time) >= self._recovery_cooldown_sec:
                     self._recovery_state = "NORMAL"
                     self._cooldown_start_time = None

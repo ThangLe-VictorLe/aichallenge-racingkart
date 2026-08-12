@@ -323,8 +323,9 @@ class MPC:
         # Containers for x and y coordinates of predicted states
         x_pred, y_pred = [], []
 
-        # Iterate over prediction horizon
-        for n in range(2, N):
+        # Iterate over prediction horizon starting from n=0 (ego position)
+        # so prediction dots always begin at the kart, not 2 waypoints ahead.
+        for n in range(0, N):
             # Get associated waypoint
             associated_waypoint = self.model.reference_path.\
                 get_waypoint(self.model.wp_id+n)

@@ -118,13 +118,18 @@ v2x_obstacle_avoidance:
   # opponent kart is detected AHEAD of us within this along-raceline distance.
   # Hysteresis: activate at activation_distance_m, deactivate at deactivation_distance_m.
   # Set activation_distance_m: 0.0 to fully disable, or a large value to always activate.
-  activation_distance_m: 30.0   # [m] turn ON avoidance when opponent closer than this
-  deactivation_distance_m: 35.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
+  activation_distance_m: 20.0   # [m] turn ON avoidance when opponent closer than this
+  deactivation_distance_m: 22.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
 
-  # --- Overtaking Steer Gain ---
+  # --- Accumulated Overtaking Steer Gain ---
   # Fixed steer gain applied while overtaking is active (overrides per-waypoint gain from steer_gain.yaml).
   # Tune this to get smooth steering response during the overtake maneuver.
   overtaking_steer_gain: 1.5    # [-] steer gain multiplier during active overtake
+  # Each time the kart goes through a recovery cycle and then enters overtaking mode,
+  # the effective overtaking_steer_gain is increased by this increment.
+  # Cycle: crash → recovery → (cooldown) → overtaking activation → gain bumped
+  overtaking_steer_gain_increment: 0.5  # [-] gain added per post-recovery overtaking activation
+  overtaking_steer_gain_max: 3.0        # [-] cap to prevent runaway gain
 
 recovery:
   enable: true
@@ -136,6 +141,13 @@ recovery:
   post_recovery_steer_gain: 2.0  # fixed steer gain override AFTER recovery (during cooldown)
   cooldown_sec: 6.0              # [s] cooldown duration after recovery finishes
   disabled_waypoints: [45, 50]   # disable recovery at race start (waypoints 45 to 50)
+
+  # --- Accumulated Steer Gain ---
+  # Each time a full stuck cycle (NORMAL→RECOVERING→COOLDOWN→NORMAL) completes,
+  # the effective post_recovery_steer_gain is increased by this increment.
+  # This helps the kart escape repeated stuck situations by steering harder each attempt.
+  post_recovery_steer_gain_increment: 0.5   # [-] gain added per recovery cycle
+  post_recovery_steer_gain_max: 4.0         # [-] cap to prevent runaway gain
 
 # =============================================================================
 # Debug Visualization
