@@ -42,8 +42,6 @@ Visualization Manager:
               Value: true
             camera_optical_link:
               Value: true
-            gnss_base_link:
-              Value: true
             gnss_link:
               Value: true
             imu_link:
@@ -65,20 +63,6 @@ Visualization Manager:
           Show Names: true
           Tree:
             map:
-              base_link:
-                camera_link:
-                  camera_optical_link:
-                    {}
-                lidar_base_link:
-                  lidar:
-                    {}
-                sensor_kit_base_link:
-                  gnss_link:
-                    {}
-                  imu_link:
-                    {}
-              gnss_base_link:
-                {}
               viewer:
                 {}
           Update Interval: 0.029999999329447746
@@ -546,7 +530,7 @@ Visualization Manager:
           Enabled: true
           Name: VehicleMarkers
           Namespaces:
-            v2x_vehicles: true
+            {}
           Topic:
             Depth: 5
             Durability Policy: Volatile
@@ -569,7 +553,7 @@ Visualization Manager:
       Enabled: true
       Name: ref_path
       Namespaces:
-        ref_path: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -651,11 +635,11 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 15.466875076293945
+      Scale: 9.546355247497559
       Target Frame: viewer
       Value: TopDownOrtho (rviz)
-      X: -8.590716361999512
-      Y: -11.295089721679688
+      X: -7.951888561248779
+      Y: 2.199561357498169
     Saved:
       - Class: rviz_default_plugins/ThirdPersonFollower
         Distance: 18

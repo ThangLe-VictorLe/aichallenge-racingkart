@@ -1498,7 +1498,13 @@ class MPCController(Node):
 
         # 約 0.25 秒ごとに予測結果を表示
         if (self._mpc.current_prediction is not None) and (self._loop % (self._mpc_cfg.control_rate // 4) == 0):
-            self._publish_mpc_pred_marker(self._mpc.current_prediction[0], self._mpc.current_prediction[1]) # type: ignore
+            # Anchor prediction to the kart's actual world position so the first
+            # dot is always at the ego, not at the nearest waypoint projection.
+            ego_x = self._odom.pose.pose.position.x
+            ego_y = self._odom.pose.pose.position.y
+            x_pred = [ego_x] + list(self._mpc.current_prediction[0]) # type: ignore
+            y_pred = [ego_y] + list(self._mpc.current_prediction[1]) # type: ignore
+            self._publish_mpc_pred_marker(x_pred, y_pred)
             if self.USE_OBSTACLE_AVOIDANCE:
                 if self._dbg_corridor:
                     self._publish_path_corridor()

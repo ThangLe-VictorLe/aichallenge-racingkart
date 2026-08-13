@@ -252,22 +252,34 @@ class MPC:
         self._init_problem(N, self.model.safety_margin)
 
         try:
-            dec = self.optimizer.solve()
-            control_signals = np.array(dec.x[-N*nu:])
-            use_control_signals = control_signals[1::2]
+            def is_traj_valid(dec_x):
+                if dec_x is None or dec_x[0] is None: return False
+                x_res = np.reshape(dec_x[:(N+1)*self.nx], (N+1, self.nx))
+                for n in range(N):
+                    wp = self.model.reference_path.get_waypoint(self.model.wp_id+n)
+                    ub = getattr(wp, 'ub_sm', None)
+                    lb = getattr(wp, 'lb_sm', None)
+                    if ub is not None and lb is not None:
+                        e_y = x_res[n, 0]
+                        if e_y > ub + 1e-2 or e_y < lb - 1e-2:
+                            return False
+                return True
 
-            if not np.all(use_control_signals):
+            dec = self.optimizer.solve()
+            
+            if dec.info.status != 'solved' or not is_traj_valid(dec.x):
                 for i in range(1, 6):
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
                     self._init_problem(N, relaxed_safety_margin)
                     dec = self.optimizer.solve()
-                    control_signals = np.array(dec.x[-N*nu:])
-                    use_control_signals = control_signals[1::2]
-
-                    if self.infeasibility_counter == 0 and np.all(use_control_signals):
-                        if self.last_solved_wp_id != self.model.wp_id:
+                    
+                    if dec.info.status == 'solved' and is_traj_valid(dec.x):
+                        if self.infeasibility_counter == 0 and self.last_solved_wp_id != self.model.wp_id:
                             print(f"Relaxed safety margin by {relaxed_safety_margin} ({5-i}/5) to solve the problem")
                         break
+            
+            control_signals = np.array(dec.x[-N*nu:])
+            use_control_signals = control_signals[1::2]
 
             # ステア角の計算と保存
             control_signals[1::2] = np.arctan(control_signals[1::2] * self.model.length)
@@ -326,9 +338,9 @@ class MPC:
         # Iterate over prediction horizon starting from n=0 (ego position)
         # so prediction dots always begin at the kart, not 2 waypoints ahead.
         for n in range(0, N):
-            # Get associated waypoint
             associated_waypoint = self.model.reference_path.\
                 get_waypoint(self.model.wp_id+n)
+
             # Transform predicted spatial state to temporal state
             predicted_temporal_state = self.model.s2t(associated_waypoint,
                                             spatial_state_prediction[n, :])
