@@ -751,6 +751,7 @@ class MPCController(Node):
             msg.upper_bounds, msg.lower_bounds, msg.rows, msg.cols)
 
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
+        print(f"[V2X Trace] Received V2X msg with {len(msg.vehicles)} vehicles", flush=True)
         self._v2x_tracker.update(msg)
 
         # === PROXIMITY GATE WITH HYSTERESIS ===
@@ -821,12 +822,16 @@ class MPCController(Node):
         if self._v2x_avoidance_active:
             predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
             new_dynamic = predictions_to_obstacles(predictions, self._v2x_vehicle_radius)
+            print(f"[V2X Trace] V2X active. predictions count: {len(predictions)}, new_dynamic count: {len(new_dynamic)}", flush=True)
             # Only trigger a map rebuild if obstacle positions changed meaningfully (>0.1m).
             # This prevents continuous corridor redraw on every V2X callback when the
             # opponent is stationary or barely moving (e.g. ego kart stopped in manual mode).
             if self._obstacles_changed(new_dynamic):
+                print("[V2X Trace] Obstacles changed! Updating self._dynamic_obstacles.", flush=True)
                 self._dynamic_obstacles = new_dynamic
                 self._obstacles_updated = True
+            else:
+                print("[V2X Trace] Obstacles did NOT change significantly. Ignored.", flush=True)
         else:
             # Opponent left range — clear dynamic obstacles so map resets to clean static corridor
             if self._dynamic_obstacles:
@@ -840,6 +845,7 @@ class MPCController(Node):
                 activate_threshold, deactivate_threshold)
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
+        print(f"[V2X Trace] _filter_obstacles_to_corridor: Input obstacles count: {len(obstacles)}", flush=True)
         if not obstacles or self._waypoint_xy.size == 0:
             return obstacles
         thr_sq = self._v2x_corridor_threshold_sq
@@ -849,6 +855,7 @@ class MPCController(Node):
             dxy = wps - np.array([ob.cx, ob.cy], dtype=np.float64)
             if np.min(np.einsum('ij,ij->i', dxy, dxy)) <= thr_sq:
                 kept.append(ob)
+        print(f"[V2X Trace] _filter_obstacles_to_corridor: Output kept count: {len(kept)}", flush=True)
         return kept
 
     def _obstacles_changed(self, new_obstacles: List[Obstacle], threshold: float = 0.1) -> bool:
@@ -1287,14 +1294,19 @@ class MPCController(Node):
 
 
         if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
+            print("[V2X Trace] _control: USE_OBSTACLE_AVOIDANCE && _obstacles_updated is True. Resetting map...", flush=True)
             self._obstacles_updated = False
             self._map.reset_map()
             if self._v2x_avoidance_active and self._dynamic_obstacles:
                 # Layer dynamic opponent predictions onto the pre-rendered static map
                 filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
                 if filtered_dynamic:
+                    print(f"[V2X Trace] _control: Adding {len(filtered_dynamic)} obstacles to map.", flush=True)
                     self._map.add_obstacles(filtered_dynamic)
+                else:
+                    print("[V2X Trace] _control: filtered_dynamic is empty, map reset without dynamic obstacles.", flush=True)
             self._reference_path.reset_dynamic_constraints()
+            print("[V2X Trace] _control: Map update sequence complete.", flush=True)
 
         is_colliding = False
         if self._last_colliding_time is not None:
@@ -1492,7 +1504,13 @@ class MPCController(Node):
                     # Suppress when V2X is active (intentional stop for overtaking),
                     # corridor is too narrow (kart waiting for gap), or control is disabled (manual).
                     v2x_suppressed = self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active
-                    if self._has_moved and u[0] > 3.6 and abs(v) < self._recovery_stuck_vel_threshold \
+                    
+                    # When MPC crashes, it uses leftover predictions for a few frames (which triggers the stuck timer).
+                    # But once it exhausts them, it returns [0.0, 0.0]. We must keep the stuck timer running in this case!
+                    mpc_exhausted = (self._mpc.infeasibility_counter > 0 and u[0] == 0.0 and u[1] == 0.0)
+                    is_commanding_forward = (u[0] > 3.6 or mpc_exhausted)
+
+                    if self._has_moved and is_commanding_forward and abs(v) < self._recovery_stuck_vel_threshold \
                             and not v2x_suppressed and not corridor_is_too_narrow and self._enable_control:
                         if self._stuck_start_time is None:
                             self._stuck_start_time = now_sec
