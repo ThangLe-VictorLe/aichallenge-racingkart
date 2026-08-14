@@ -36,11 +36,11 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.5   # artificially squeezed to force strict tracking
+  width: 1.0   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: false
-  use_dynamic_steer_gain: false
+  use_dynamic_steer_gain: true
   N: 18
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
@@ -131,10 +131,11 @@ recovery:
   stuck_vel_threshold_kmh: 0.3   # [km/h] threshold to consider vehicle stuck
   stuck_time_sec: 0.5            # [s] seconds stuck before triggering recovery
   reverse_vel_kmh: -5.0          # [km/h] speed when reversing out
-  reverse_time_sec: 6.0          # [s] duration to reverse
+  reverse_time_sec: 3.0          # [s] duration to reverse
   recovery_steer_gain: 2.0       # fixed steer gain override during recovery
   post_recovery_steer_gain: 2.0  # fixed steer gain override AFTER recovery (during cooldown)
-  cooldown_sec: 6.0              # [s] cooldown duration after recovery finishes
+  cooldown_sec: 2.0              # [s] cooldown duration after recovery finishes
+  cooldown_Q0: 10000000.0        # Q[0] override during cooldown
   disabled_waypoints: []         # disable recovery at race start (waypoints 45 to 50)
 
 # =============================================================================
@@ -163,5 +164,3 @@ debug_visualization:
   path_corridor:      true   # RViz2: drivable corridor bounds ahead of kart
   dynamic_obstacles:  true   # RViz2: V2X opponent obstacle blobs (orange cylinders)
   v2x_status_text:    true   # RViz2: floating text showing V2X gate state
-
-

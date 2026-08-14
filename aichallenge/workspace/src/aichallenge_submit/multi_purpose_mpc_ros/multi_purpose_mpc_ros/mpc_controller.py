@@ -576,6 +576,7 @@ class MPCController(Node):
             self._recovery_steer_gain = float(getattr(recovery_cfg, 'recovery_steer_gain', 1.0))
             self._post_recovery_steer_gain = float(getattr(recovery_cfg, 'post_recovery_steer_gain', 1.0))
             self._recovery_cooldown_sec = float(getattr(recovery_cfg, 'cooldown_sec', 2.0))
+            self._recovery_cooldown_Q0 = float(getattr(recovery_cfg, 'cooldown_Q0', 10000000.0))
             raw_disabled = getattr(recovery_cfg, 'disabled_waypoints', None)
             if raw_disabled is None:
                 raw_disabled = getattr(recovery_cfg, 'disabled_waypoint_ranges', None)
@@ -588,7 +589,10 @@ class MPCController(Node):
             self._recovery_steer_gain = 1.0
             self._post_recovery_steer_gain = 1.0
             self._recovery_cooldown_sec = 2.0
+            self._recovery_cooldown_Q0 = 10000000.0
             raw_disabled = None
+
+        self._default_Q0 = float(self._cfg.mpc.Q[0])
 
         self._recovery_disabled_ranges: List[Tuple[int, int]] = []
         if raw_disabled is not None:
@@ -739,19 +743,34 @@ class MPCController(Node):
             self._enable_control = True
             self._has_moved = False
             self._recovery_state = "NORMAL"
+            if hasattr(self, '_default_Q0'):
+                self._set_Q0(self._default_Q0)
             self._stuck_start_time = None
         elif not msg.data and self._enable_control:
             self._enable_control = False
             self._has_moved = False
             self._recovery_state = "NORMAL"
+            if hasattr(self, '_default_Q0'):
+                self._set_Q0(self._default_Q0)
             self._stuck_start_time = None
+
+    def _set_Q0(self, q0_value: float):
+        if self._cfg.mpc.Q[0] == q0_value:
+            return
+        self._cfg.mpc.Q[0] = q0_value
+        if hasattr(self, '_mpc_cfg') and hasattr(self, '_mpc'):
+            self._mpc_cfg.Q = sparse.diags(self._cfg.mpc.Q)
+            self._mpc.update_Q(self._mpc_cfg.Q)
+            self.get_logger().info(f"[RECOVERY DEBUG] MPC Q[0] dynamically updated to {q0_value}")
 
     def _path_constraints_callback(self, msg: PathConstraints):
         self._reference_path.set_path_constraints(
             msg.upper_bounds, msg.lower_bounds, msg.rows, msg.cols)
 
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
-        print(f"[V2X Trace] Received V2X msg with {len(msg.vehicles)} vehicles", flush=True)
+        import time
+        t_v2x_start = time.time()
+        # print(f"[V2X Trace] Received V2X msg with {len(msg.vehicles)} vehicles", flush=True)
         self._v2x_tracker.update(msg)
 
         # === PROXIMITY GATE WITH HYSTERESIS ===
@@ -829,20 +848,21 @@ class MPCController(Node):
             if self._obstacles_changed(new_dynamic):
                 print("[V2X Trace] Obstacles changed! Updating self._dynamic_obstacles.", flush=True)
                 self._dynamic_obstacles = new_dynamic
-                self._obstacles_updated = True
             else:
                 print("[V2X Trace] Obstacles did NOT change significantly. Ignored.", flush=True)
         else:
             # Opponent left range — clear dynamic obstacles so map resets to clean static corridor
             if self._dynamic_obstacles:
                 self._dynamic_obstacles = []
-                self._obstacles_updated = True  # trigger map reset to clear old obstacle blobs
 
         # --- V2X diagnostic terminal log (throttled, enabled via config) ---
         if self._dbg_v2x_log:
             self._v2x_diagnostic_log(
                 msg, ego_wp_id, ego_s, track_len,
                 activate_threshold, deactivate_threshold)
+                
+        if self._v2x_avoidance_active:
+            print(f"[PROFILE] V2X Callback total: {(time.time() - t_v2x_start)*1000:.2f} ms", flush=True)
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
         print(f"[V2X Trace] _filter_obstacles_to_corridor: Input obstacles count: {len(obstacles)}", flush=True)
@@ -1293,20 +1313,8 @@ class MPCController(Node):
             # plot_reference_path(self._car)
 
 
-        if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
-            print("[V2X Trace] _control: USE_OBSTACLE_AVOIDANCE && _obstacles_updated is True. Resetting map...", flush=True)
-            self._obstacles_updated = False
-            self._map.reset_map()
-            if self._v2x_avoidance_active and self._dynamic_obstacles:
-                # Layer dynamic opponent predictions onto the pre-rendered static map
-                filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
-                if filtered_dynamic:
-                    print(f"[V2X Trace] _control: Adding {len(filtered_dynamic)} obstacles to map.", flush=True)
-                    self._map.add_obstacles(filtered_dynamic)
-                else:
-                    print("[V2X Trace] _control: filtered_dynamic is empty, map reset without dynamic obstacles.", flush=True)
+        if self.USE_OBSTACLE_AVOIDANCE:
             self._reference_path.reset_dynamic_constraints()
-            print("[V2X Trace] _control: Map update sequence complete.", flush=True)
 
         is_colliding = False
         if self._last_colliding_time is not None:
@@ -1356,12 +1364,16 @@ class MPCController(Node):
 
 
         # === CORRIDOR CHECK (must come BEFORE get_control()) ===
+        import time
+        t_corridor_start = time.time()
         # Compute corridor width first. If too narrow, issue a direct ackermann stop
         # and return immediately — never let the MPC solver run in this case, because
         # the solver will produce high acceleration that the rest of the loop can't override.
         min_corridor_width = (self._car.width + 0.2) if (hasattr(self, '_car') and self._car is not None) else (self._cfg.bicycle_model.width + 0.2)
         curr_width_val = self._compute_corridor_width_at_ego()
         corridor_is_too_narrow = bool(curr_width_val < min_corridor_width) if self.USE_OBSTACLE_AVOIDANCE else False
+        if self._v2x_avoidance_active:
+            print(f"[PROFILE] Corridor width check took: {(time.time() - t_corridor_start)*1000:.2f} ms", flush=True)
 
         if corridor_is_too_narrow:
             if self._recovery_state != "NARROW":
@@ -1410,7 +1422,12 @@ class MPCController(Node):
                 self._gear_pub.publish(gear_msg)
 
         with self._stats.time_block("control"):
-            u, max_delta = self._mpc.get_control()
+            import time
+            t_mpc_start = time.time()
+            dynamic_obs = self._dynamic_obstacles if (self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active) else []
+            u, max_delta = self._mpc.get_control(dynamic_obstacles=dynamic_obs)
+            if self._v2x_avoidance_active:
+                print(f"[PROFILE] MPC get_control took: {(time.time() - t_mpc_start)*1000:.2f} ms", flush=True)
             # self.get_logger().info(f"u: {u}")
 
         if self._mpc_cfg.use_csv_velocity:
@@ -1458,9 +1475,16 @@ class MPCController(Node):
                 if (now_sec - self._recovering_start_time) < self._recovery_reverse_time_sec:
                     is_recovering = True
                     # AWSIM: REVERSE gear + positive acc/speed moves the kart backward
-                    u[0] = abs(self._recovery_reverse_vel)  # positive km/h target in REVERSE gear
-                    # Negate steer: reverse opposite to forward path direction to back away from wall
-                    u[1] = -u[1]
+                    # Divide by 3.6 because u[0] expects m/s, but reverse_vel is in km/h
+                    u[0] = abs(self._recovery_reverse_vel) / 3.6
+                    
+                    # If MPC is infeasible (returns 0), we use e_y to steer back towards the path.
+                    # e_y > 0 means we are left of path. In reverse, steering right (negative)
+                    # moves the rear towards the path (to the right).
+                    e_y = self._car.spatial_state.e_y
+                    u[1] = 0.5 * e_y
+                    self.get_logger().info(f"[RECOVERY DEBUG] Reverse e_y: {e_y:.3f}, steering to {u[1]:.3f}", throttle_duration_sec=0.5)
+                    
                     # Override steer gain to fixed recovery gain during recovery
                     self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
                 else:
@@ -1481,9 +1505,19 @@ class MPCController(Node):
 
             elif self._recovery_state == "COOLDOWN":
                 self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
+                
+                # If MPC is still infeasible/giving zero speed, force it to crawl forward
+                if u[0] < 0.1:
+                    u[0] = 1.0  # 3.6 km/h (crawl speed in m/s)
+                    e_y = self._car.spatial_state.e_y
+                    # In DRIVE, e_y > 0 (left of path) -> steer right (negative) to get to center
+                    u[1] = -0.5 * e_y
+                    self.get_logger().info(f"[RECOVERY DEBUG] Cooldown overriding MPC, forcing forward crawl. e_y: {e_y:.3f}, steer: {u[1]:.3f}", throttle_duration_sec=0.5)
+                
                 if self._cooldown_start_time is not None and (now_sec - self._cooldown_start_time) >= self._recovery_cooldown_sec:
                     self._recovery_state = "NORMAL"
                     self._cooldown_start_time = None
+                    self._set_Q0(self._default_Q0)
                     self.get_logger().info("Recovery cooldown done. Back to NORMAL.")
 
             elif self._recovery_state == "NORMAL":
@@ -1518,6 +1552,7 @@ class MPCController(Node):
                         elif (now_sec - self._stuck_start_time) >= self._recovery_stuck_time_sec:
                             self.get_logger().warn(f"Stuck detected at wp {curr_wp_id}! Switching to REVERSE gear, recovering for {self._recovery_reverse_time_sec}s...")
                             self._recovery_state = "RECOVERING"
+                            self._set_Q0(self._recovery_cooldown_Q0)
                             self._recovering_start_time = now_sec
                             is_recovering = True
                             u[0] = abs(self._recovery_reverse_vel)  # positive km/h in REVERSE gear
@@ -1548,7 +1583,8 @@ class MPCController(Node):
         elif is_recovering:
             bug_acc_enabled = False
             # AWSIM: REVERSE gear + positive acc moves backward
-            acc = self._mpc_cfg.a_max  # full forward acc in REVERSE gear = move backward
+            acc = self.KP * (u[0] - abs(v))
+            acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
         elif self.USE_BUG_ACC:
             def deg2rad(deg):
                 return deg * np.pi / 180.0
