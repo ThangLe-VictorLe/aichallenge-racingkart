@@ -786,25 +786,39 @@ class MPCController(Node):
 
         any_opponent_in_activate_range = False
         any_opponent_in_deactivate_range = False
-        for v in msg.vehicles:
+        
+        ego_x = self._car.temporal_state.x if self._car else 0.0
+        ego_y = self._car.temporal_state.y if self._car else 0.0
+
+        for idx, v in enumerate(msg.vehicles):
             opp_x = float(v.position.x)
             opp_y = float(v.position.y)
+            
+            # Check if this vehicle is actually ego
+            dist_to_ego = np.hypot(opp_x - ego_x, opp_y - ego_y)
+            if dist_to_ego < 0.5:  # 0.5m threshold to filter out self
+                print(f"[V2X Trace] Skipping vehicle {idx} - Too close to ego (dist: {dist_to_ego:.2f}m). Assumed to be ego.", flush=True)
+                continue
+                
             # Snap opponent to nearest waypoint
             dxy = self._waypoint_xy - np.array([opp_x, opp_y], dtype=np.float64)
             dists_sq = np.einsum('ij,ij->i', dxy, dxy)
             nearest_wp_id = int(np.argmin(dists_sq))
-            # Skip if this is the ego vehicle (same position as us)
-            if np.sqrt(dists_sq[nearest_wp_id]) < 0.1:
-                continue
             opp_s = self._waypoint_s[nearest_wp_id]
+            
             # Signed forward distance along raceline; wraps cleanly on circular track
             ds = (opp_s - ego_s) % track_len
+            
+            print(f"[V2X Trace] Vehicle {idx} | opp_s: {opp_s:.2f} | ego_s: {ego_s:.2f} | ds: {ds:.2f}m | activate_th: {activate_threshold} | deactivate_th: {deactivate_threshold}", flush=True)
+            
             # ds in (0, track_len): small = just ahead, large = behind us
-            if 0.0 < ds <= activate_threshold:
+            # Allow opponent to be slightly behind us (e.g. ds > track_len - 2.0) and still keep avoidance active
+            if 0.0 <= ds <= activate_threshold or ds > track_len - 2.0:
                 any_opponent_in_activate_range = True
-                break
-            if 0.0 < ds <= deactivate_threshold:
+                print(f"[V2X Trace] -> Vehicle {idx} triggered ACTIVATE range.", flush=True)
+            if 0.0 <= ds <= deactivate_threshold or ds > track_len - 3.0:
                 any_opponent_in_deactivate_range = True
+                print(f"[V2X Trace] -> Vehicle {idx} triggered DEACTIVATE range (kept active).", flush=True)
 
         # Apply hysteresis: activate on close approach, deactivate only when all clear.
         # Additionally enforce a minimum dwell time to prevent wp_id jitter from toggling
