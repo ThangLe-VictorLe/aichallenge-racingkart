@@ -488,3 +488,33 @@ class BicycleModel(SpatialBicycleModel):
         B = np.stack((b_1, b_2, b_3), axis=0)
 
         return f, A, B
+
+    def linearize_vectorized(self, v_ref_arr, kappa_ref_arr, delta_s_arr):
+        """
+        Vectorized version of linearize.
+        :param v_ref_arr: N-length array of velocity references
+        :param kappa_ref_arr: N-length array of kappa
+        :param delta_s_arr: N-length array of delta_s
+        :return: f_arr, A_arr, B_arr of shape (N, 3), (N, 3, 3), (N, 3, 2)
+        """
+        N = len(v_ref_arr)
+        A = np.zeros((N, 3, 3))
+        B = np.zeros((N, 3, 2))
+        f = np.zeros((N, 3))
+
+        A[:, 0, 0] = 1
+        A[:, 0, 1] = delta_s_arr
+        A[:, 1, 0] = -kappa_ref_arr ** 2 * delta_s_arr
+        A[:, 1, 1] = 1
+        A[:, 2, 2] = 1
+
+        B[:, 1, 1] = delta_s_arr
+
+        # Handle v_ref != 0
+        mask = v_ref_arr != 0
+        if np.any(mask):
+            A[mask, 2, 0] = -kappa_ref_arr[mask] / v_ref_arr[mask] * delta_s_arr[mask]
+            B[mask, 2, 0] = -1 / (v_ref_arr[mask] ** 2) * delta_s_arr[mask]
+            f[mask, 2] = 1 / v_ref_arr[mask] * delta_s_arr[mask]
+
+        return f, A, B

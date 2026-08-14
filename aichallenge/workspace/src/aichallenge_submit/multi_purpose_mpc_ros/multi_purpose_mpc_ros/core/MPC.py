@@ -86,13 +86,14 @@ class MPC:
         self.max_steering_rate = max_steering_rate
 
 
-    def _init_problem(self, N, safety_margin):
+    def _init_problem(self, N, umin, umax, safety_margin, dynamic_obstacles=None):
+        import time
+        t_start = time.time()
+        
         """
         Initialize optimization problem for current time step with steering rate constraints.
         """
         # 既存の制約設定
-        umin = self.input_constraints['umin']
-        umax = self.input_constraints['umax']
         xmin = self.state_constraints['xmin']
         xmax = self.state_constraints['xmax']
 
@@ -100,14 +101,26 @@ class MPC:
         nx_N = self.nx * (N + 1)
         nu_N = self.nu * N
 
-        # LTV System Matrices
-        A = np.zeros((nx_N, nx_N))
-        B = np.zeros((nx_N, nu_N))
-
         # Reference vector
         ur = np.zeros(nu_N)
         xr = np.zeros(nx_N)
         uq = np.zeros(N * self.nx)
+
+        # Collect values for vectorized linearize
+        v_ref_list = []
+        kappa_ref_list = []
+        delta_s_list = []
+
+        for n in range(N):
+            current_waypoint = self.model.reference_path.get_waypoint(self.model.wp_id + n)
+            next_waypoint = self.model.reference_path.get_waypoint(self.model.wp_id + n + 1)
+            v_ref_list.append(np.clip(current_waypoint.v_ref, umin[0], umax[0]))
+            kappa_ref_list.append(current_waypoint.kappa)
+            delta_s_list.append(next_waypoint - current_waypoint)
+        
+        f_arr, A_arr, B_arr = self.model.linearize_vectorized(
+            np.array(v_ref_list), np.array(kappa_ref_list), np.array(delta_s_list)
+        )
 
         # Dynamic constraints
         xmin_dyn = np.kron(np.ones(N + 1), xmin)
@@ -122,23 +135,9 @@ class MPC:
 
         # Iterate over horizon
         for n in range(N):
-            # Get waypoint information
-            current_waypoint = self.model.reference_path.get_waypoint(self.model.wp_id + n)
-            next_waypoint = self.model.reference_path.get_waypoint(self.model.wp_id + n + 1)
-            delta_s = next_waypoint - current_waypoint
-            kappa_ref = current_waypoint.kappa
-
-            # Clip reference velocity
-            v_ref = np.clip(current_waypoint.v_ref, self.input_constraints['umin'][0], self.input_constraints['umax'][0])
-
-            # Compute LTV matrices
-            f, A_lin, B_lin = self.model.linearize(v_ref, kappa_ref, delta_s)
-            A[(n+1) * self.nx: (n+2)*self.nx, n * self.nx:(n+1)*self.nx] = A_lin
-            B[(n+1) * self.nx: (n+2)*self.nx, n * self.nu:(n+1)*self.nu] = B_lin
-
             # Set reference
-            ur[n*self.nu:(n+1)*self.nu] = [v_ref, kappa_ref]
-            uq[n * self.nx:(n+1)*self.nx] = B_lin.dot([v_ref, kappa_ref]) - f
+            ur[n*self.nu:(n+1)*self.nu] = [v_ref_list[n], kappa_ref_list[n]]
+            uq[n * self.nx:(n+1)*self.nx] = B_arr[n].dot([v_ref_list[n], kappa_ref_list[n]]) - f_arr[n]
 
             # Constrain maximum speed based on curvature
             if self.use_max_kappa_pred:
@@ -148,12 +147,11 @@ class MPC:
                 vmax_dyn = np.sqrt(self.ay_max / (np.abs(kappa_pred[n]) + 1e-12))
             umax_dyn[self.nu*n] = min(vmax_dyn, umax_dyn[self.nu*n])
 
-        # Update path constraints
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
             ub, lb, _ = self.model.reference_path.update_path_constraints(
                 self.model.wp_id + 1,
                 [self.model.temporal_state.x, self.model.temporal_state.y, self.model.temporal_state.psi],
-                N, self.model.length, self.model.width, safety_margin)
+                N, self.model.length, self.model.width, safety_margin, dynamic_obstacles=dynamic_obstacles)
         else:
             ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
             ub = self.model.reference_path.path_constraints[0][ref_wp_id]
@@ -172,6 +170,7 @@ class MPC:
 
         self.current_ub = ub
         self.current_lb = lb
+        t_path_end = time.time()
 
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
@@ -180,8 +179,21 @@ class MPC:
         xr[self.nx::self.nx] = (lb + ub) / 2
 
         # Get equality matrix
-        Ax = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx)) + sparse.csc_matrix(A)
-        Bu = sparse.csc_matrix(B)
+        A_blocks = [A_arr[n] for n in range(N)]
+        B_blocks = [B_arr[n] for n in range(N)]
+        
+        A_block_diag = sparse.block_diag(A_blocks)
+        Z_top_A = sparse.csc_matrix((self.nx, N * self.nx))
+        A_left = sparse.vstack([Z_top_A, A_block_diag])
+        Z_right_A = sparse.csc_matrix(((N + 1) * self.nx, self.nx))
+        A_sparse = sparse.hstack([A_left, Z_right_A])
+
+        B_block_diag = sparse.block_diag(B_blocks)
+        Z_top_B = sparse.csc_matrix((self.nx, N * self.nu))
+        B_sparse = sparse.vstack([Z_top_B, B_block_diag])
+
+        Ax = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx)) + A_sparse
+        Bu = B_sparse
         Aeq = sparse.hstack([Ax, Bu])
 
         # ステアリングレート制約の行列を構築
@@ -221,6 +233,12 @@ class MPC:
         l = np.hstack([leq, lineq_basic, lineq_rate])
         u = np.hstack([ueq, uineq_basic, uineq_rate])
 
+        len_eq = len(leq)
+        l_ey = l[len_eq + self.nx : len_eq + self.nx*(N+1) : self.nx]
+        u_ey = u[len_eq + self.nx : len_eq + self.nx*(N+1) : self.nx]
+        print(f"[MPC DEBUG] Solver l_ey (first 5): {l_ey[:5]}", flush=True)
+        print(f"[MPC DEBUG] Solver u_ey (first 5): {u_ey[:5]}", flush=True)
+
         # コスト行列
         P = sparse.block_diag([
             sparse.kron(sparse.eye(N), self.Q),
@@ -235,43 +253,64 @@ class MPC:
         ])
 
         # オプティマイザの設定
+        t_matrix_end = time.time()
         self.optimizer = osqp.OSQP()
         self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, verbose=False)
+        t_setup_end = time.time()
+        print(f"[MPC INIT PROFILE] path_constraints: {(t_path_end - t_start)*1000:.2f}ms | matrix_build: {(t_matrix_end - t_path_end)*1000:.2f}ms | osqp_setup: {(t_setup_end - t_matrix_end)*1000:.2f}ms", flush=True)
+        return P, q, A_full, l, u
 
-    def get_control(self) -> Tuple[np.ndarray, float]:
+    def get_control(self, dynamic_obstacles=None) -> Tuple[np.ndarray, float]:
         """
         Get control signal given the current position of the car.
         """
         nx = self.nx
         nu = self.nu
+        import time
+        t_start = time.time()
 
         self.model.get_current_waypoint()
 
         N = min(self.N, self.model.reference_path.n_waypoints - self.model.wp_id) \
             if not self.model.reference_path.circular else self.N
 
+        t_t2s_start = time.time()
         self.model.spatial_state = self.model.t2s(
             reference_state=self.model.temporal_state,
             reference_waypoint=self.model.current_waypoint)
+        t_t2s_end = time.time()
 
-        self._init_problem(N, self.model.safety_margin)
+        t_init_start = time.time()
+        P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], self.model.safety_margin, dynamic_obstacles=dynamic_obstacles)
+        t_init_end = time.time()
+
+        print(f"[MPC DEBUG] get_control (wp_id={self.model.wp_id}, N={N}) ===", flush=True)
+        if self.current_lb is not None and self.current_ub is not None:
+            print(f"[MPC DEBUG] LB (first 5): {self.current_lb[:5]}", flush=True)
+            print(f"[MPC DEBUG] UB (first 5): {self.current_ub[:5]}", flush=True)
 
         try:
+            t_solve_start = time.time()
             dec = self.optimizer.solve()
+            t_solve_end = time.time()
+            print(f"[MPC PROFILE] t2s: {(t_t2s_end - t_t2s_start)*1000:.2f}ms | init_prob: {(t_init_end - t_init_start)*1000:.2f}ms | solve: {(t_solve_end - t_solve_start)*1000:.2f}ms", flush=True)
+            print(f"[MPC DEBUG] OSQP status: {dec.info.status}", flush=True)
+
             control_signals = np.array(dec.x[-N*nu:])
             use_control_signals = control_signals[1::2]
 
             if not np.all(use_control_signals):
                 for i in range(1, 6):
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
-                    self._init_problem(N, relaxed_safety_margin)
+                    self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], relaxed_safety_margin, dynamic_obstacles=dynamic_obstacles)
                     dec = self.optimizer.solve()
+                    print(f"[MPC DEBUG] OSQP status (relaxed {i}/5): {dec.info.status}", flush=True)
                     control_signals = np.array(dec.x[-N*nu:])
                     use_control_signals = control_signals[1::2]
 
                     if self.infeasibility_counter == 0 and np.all(use_control_signals):
                         if self.last_solved_wp_id != self.model.wp_id:
-                            print(f"Relaxed safety margin by {relaxed_safety_margin} ({5-i}/5) to solve the problem")
+                            print(f"[MPC DEBUG] Relaxed safety margin by {relaxed_safety_margin} ({5-i}/5) to solve the problem")
                         break
 
             # ステア角の計算と保存
@@ -294,11 +333,22 @@ class MPC:
             self.current_prediction_raw = x
             self.current_prediction = self.update_prediction(x, N)
 
+            print(f"[MPC DEBUG] Predicted e_y (first 5): {x[1:6, 0]}", flush=True)
+            violations = []
+            if self.current_lb is not None and self.current_ub is not None:
+                for n in range(N):
+                    if x[n+1, 0] > self.current_ub[n] + 1e-3 or x[n+1, 0] < self.current_lb[n] - 1e-3:
+                        violations.append((n, x[n+1, 0], self.current_lb[n], self.current_ub[n]))
+                if violations:
+                    print(f"[MPC DEBUG] WARNING: Prediction violates bounds! {len(violations)} violations. First: {violations[0]}", flush=True)
+                else:
+                    print("[MPC DEBUG] Prediction respects bounds.", flush=True)
+
             u = np.array([v, delta])
             max_delta = np.max(np.abs(control_signals[1:len(control_signals)//3*2:2]))
 
             if self.infeasibility_counter > (N - 1):
-                print(f'Problem solved after {self.infeasibility_counter} infeasible iterations')
+                print(f'[MPC DEBUG] Problem solved after {self.infeasibility_counter} infeasible iterations')
             self.infeasibility_counter = 0
             self.last_solved_wp_id = self.model.wp_id
 

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from PIL import Image
 from skimage.morphology import remove_small_holes
-from skimage.draw import line_aa
+from skimage.draw import line
 import matplotlib.patches as plt_patches
 
 # Colors
@@ -188,7 +188,7 @@ class Map:
         for boundary in boundaries:
             sx = self.w2m(boundary[0][0], boundary[0][1])
             gx = self.w2m(boundary[1][0], boundary[1][1])
-            path_x, path_y, _ = line_aa(sx[0], sx[1], gx[0], gx[1])
+            path_x, path_y = line(sx[0], sx[1], gx[0], gx[1])
             for x, y in zip(path_x, path_y):
                 self.data[y, x] = 0
 
