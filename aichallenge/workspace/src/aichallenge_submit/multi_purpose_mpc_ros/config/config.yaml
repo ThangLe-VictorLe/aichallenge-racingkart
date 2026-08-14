@@ -36,7 +36,7 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.0   # artificially squeezed to force strict tracking
+  width: 1.4   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: false

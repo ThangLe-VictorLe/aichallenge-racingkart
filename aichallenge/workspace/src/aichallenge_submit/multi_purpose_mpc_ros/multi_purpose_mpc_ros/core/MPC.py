@@ -64,6 +64,45 @@ class MPC:
                 N,
                 self.model.safety_margin)
 
+        self._precompute_static_matrices()
+
+    def _precompute_P(self):
+        from scipy import sparse
+        self._P_cached = sparse.block_diag([
+            sparse.kron(sparse.eye(self.N), self.Q),
+            self.QN,
+            sparse.kron(sparse.eye(self.N), self.R)
+        ], format='csc')
+
+    def _precompute_static_matrices(self):
+        from scipy import sparse
+        N = self.N
+        
+        # Precompute P
+        self._precompute_P()
+        
+        # Precompute Ax static base
+        self._Ax_static_cached = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx))
+        
+        # Precompute Zero blocks for equality constraints
+        self._Z_top_A = sparse.csc_matrix((self.nx, N * self.nx))
+        self._Z_right_A = sparse.csc_matrix(((N + 1) * self.nx, self.nx))
+        self._Z_top_B = sparse.csc_matrix((self.nx, N * self.nu))
+        
+        # Precompute steering rate matrix & A_inequality
+        nx_N = self.nx * (N + 1)
+        nu_N = self.nu * N
+        n_rate_constraints = N - 1
+        steering_rate_matrix = np.zeros((n_rate_constraints, nx_N + nu_N))
+        for i in range(n_rate_constraints):
+            steering_rate_matrix[i, nx_N + self.nu*i + 1] = -1
+            steering_rate_matrix[i, nx_N + self.nu*(i+1) + 1] = 1
+            
+        self._A_inequality_cached = sparse.vstack([
+            sparse.eye(nx_N + nu_N),
+            sparse.csc_matrix(steering_rate_matrix)
+        ])
+
     def update_v_max(self, v_max: float):
         self.input_constraints['umax'][0] = v_max
 
@@ -75,12 +114,15 @@ class MPC:
 
     def update_Q(self, Q: np.ndarray):
         self.Q = Q
+        if hasattr(self, '_P_cached'): self._precompute_P()
 
     def update_R(self, R: np.ndarray):
         self.R = R
+        if hasattr(self, '_P_cached'): self._precompute_P()
 
     def update_QN(self, QN: np.ndarray):
         self.QN = QN
+        if hasattr(self, '_P_cached'): self._precompute_P()
 
     def update_max_steering_rate(self, max_steering_rate: float):
         self.max_steering_rate = max_steering_rate
@@ -183,37 +225,18 @@ class MPC:
         B_blocks = [B_arr[n] for n in range(N)]
         
         A_block_diag = sparse.block_diag(A_blocks)
-        Z_top_A = sparse.csc_matrix((self.nx, N * self.nx))
-        A_left = sparse.vstack([Z_top_A, A_block_diag])
-        Z_right_A = sparse.csc_matrix(((N + 1) * self.nx, self.nx))
-        A_sparse = sparse.hstack([A_left, Z_right_A])
+        A_left = sparse.vstack([self._Z_top_A, A_block_diag])
+        A_sparse = sparse.hstack([A_left, self._Z_right_A])
 
         B_block_diag = sparse.block_diag(B_blocks)
-        Z_top_B = sparse.csc_matrix((self.nx, N * self.nu))
-        B_sparse = sparse.vstack([Z_top_B, B_block_diag])
+        B_sparse = sparse.vstack([self._Z_top_B, B_block_diag])
 
-        Ax = sparse.kron(sparse.eye(N + 1), -sparse.eye(self.nx)) + A_sparse
+        Ax = self._Ax_static_cached + A_sparse
         Bu = B_sparse
         Aeq = sparse.hstack([Ax, Bu])
 
-        # ステアリングレート制約の行列を構築
-        n_rate_constraints = N - 1
-        steering_rate_matrix = np.zeros((n_rate_constraints, nx_N + nu_N))
-
-        # ステアリングレート制約の行列を設定
-        for i in range(n_rate_constraints):
-            # 連続する制御入力間の差分に対する係数を設定
-            steering_rate_matrix[i, nx_N + self.nu*i + 1] = -1  # 現在のステア角
-            steering_rate_matrix[i, nx_N + self.nu*(i+1) + 1] = 1  # 次のステア角
-
-        # 制約行列の結合
-        A_inequality = sparse.vstack([
-            sparse.eye(nx_N + nu_N),  # 状態と入力の基本的な制約
-            sparse.csc_matrix(steering_rate_matrix)  # ステアリングレート制約
-        ])
-
         # 完全な制約行列
-        A_full = sparse.vstack([Aeq, A_inequality], format='csc')
+        A_full = sparse.vstack([Aeq, self._A_inequality_cached], format='csc')
 
         # 境界制約の構築
         x0 = np.array(self.model.spatial_state[:])
@@ -225,6 +248,7 @@ class MPC:
         uineq_basic = np.hstack([xmax_dyn, umax_dyn])
 
         # ステアリングレート制約の境界
+        n_rate_constraints = N - 1
         max_delta_change = self.max_steering_rate * self.model.Ts
         lineq_rate = -max_delta_change * np.ones(n_rate_constraints)
         uineq_rate = max_delta_change * np.ones(n_rate_constraints)
@@ -240,11 +264,7 @@ class MPC:
         print(f"[MPC DEBUG] Solver u_ey (first 5): {u_ey[:5]}", flush=True)
 
         # コスト行列
-        P = sparse.block_diag([
-            sparse.kron(sparse.eye(N), self.Q),
-            self.QN,
-            sparse.kron(sparse.eye(N), self.R)
-        ], format='csc')
+        P = self._P_cached
 
         q = np.hstack([
             -np.tile(np.diag(self.Q.toarray()), N) * xr[:-self.nx],
