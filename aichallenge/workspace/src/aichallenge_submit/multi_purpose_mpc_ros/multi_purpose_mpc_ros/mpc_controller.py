@@ -533,6 +533,12 @@ class MPCController(Node):
             self._v2x_activation_dist = float(v2x_cfg.activation_distance_m)  # type: ignore
             self._v2x_deactivation_dist = float(v2x_cfg.deactivation_distance_m)  # type: ignore
             self._overtaking_steer_gain = float(v2x_cfg.overtaking_steer_gain)  # type: ignore
+            
+            # Tailing & Overtaking Config
+            self._v2x_tailing_distance = float(getattr(v2x_cfg, 'tailing_distance_m', 15.0))
+            self._v2x_launch_distance = float(getattr(v2x_cfg, 'launch_distance_m', 8.0))
+            self._v2x_ignore_tailing_vel = float(getattr(v2x_cfg, 'ignore_tailing_vel_kmh', 10.0))
+            
             # Runtime state
             self._v2x_avoidance_active = False
             # Minimum time (seconds) the V2X active state must hold before it can flip again.
@@ -787,6 +793,9 @@ class MPCController(Node):
         any_opponent_in_activate_range = False
         any_opponent_in_deactivate_range = False
         
+        nearest_opponent_vid = None
+        min_opponent_ds = float('inf')
+        
         ego_x = self._car.temporal_state.x if self._car else 0.0
         ego_y = self._car.temporal_state.y if self._car else 0.0
 
@@ -819,6 +828,15 @@ class MPCController(Node):
             if 0.0 <= ds <= deactivate_threshold or ds > track_len - 3.0:
                 any_opponent_in_deactivate_range = True
                 print(f"[V2X Trace] -> Vehicle {idx} triggered DEACTIVATE range (kept active).", flush=True)
+                
+                # Track the nearest opponent for speed matching (tailing)
+                actual_ds = ds if ds <= deactivate_threshold else ds - track_len
+                if actual_ds > 0 and actual_ds < min_opponent_ds:
+                    min_opponent_ds = actual_ds
+                    nearest_opponent_vid = v.vehicle_id
+                    
+        self._nearest_opponent_vid = nearest_opponent_vid
+        self._nearest_opponent_ds = min_opponent_ds
 
         # Apply hysteresis: activate on close approach, deactivate only when all clear.
         # Additionally enforce a minimum dwell time to prevent wp_id jitter from toggling
@@ -1465,6 +1483,33 @@ class MPCController(Node):
                 self._mpc.update_v_max(ref_vel_kmph)
                 v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
                 self._reference_path.set_v_ref(v_ref)
+
+        # Tail opponent if V2X avoidance is active (Idea A)
+        if self.USE_OBSTACLE_AVOIDANCE and getattr(self, '_v2x_avoidance_active', False):
+            nearest_vid = getattr(self, '_nearest_opponent_vid', None)
+            min_ds = getattr(self, '_nearest_opponent_ds', float('inf'))
+            
+            # If within tailing distance, but not yet in launch distance
+            if nearest_vid is not None and self._v2x_launch_distance < min_ds < self._v2x_tailing_distance:
+                opp_vx, opp_vy = self._v2x_tracker.velocity(nearest_vid)
+                opp_speed_mps = np.hypot(opp_vx, opp_vy)
+                opp_speed_kmph = opp_speed_mps * 3.6
+                
+                # Ignore tailing if the opponent is very slow or stopped (e.g. < 10 km/h)
+                if opp_speed_kmph >= self._v2x_ignore_tailing_vel:
+                    # Speed matching: slightly faster than opponent to close the gap, but not ram them
+                    speed_delta = max(0.5, min_ds * 0.1) # 1.5 m/s at 15m, 0.5 m/s at 5m
+                    tail_speed_mps = opp_speed_mps + speed_delta
+                    
+                    # Cap the mpc v_max
+                    current_v_max = self._mpc.input_constraints['umax'][0]
+                    new_v_max = min(current_v_max, tail_speed_mps)
+                    self._mpc.update_v_max(new_v_max)
+                    self.get_logger().info(f"[TAILING] Opponent '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Capping v_max to {new_v_max*3.6:.1f} km/h.", throttle_duration_sec=1.0)
+                else:
+                    self.get_logger().info(f"[TAILING] Opponent is slow ({opp_speed_kmph:.1f} km/h). Ignoring tailing, executing overtake immediately.", throttle_duration_sec=1.0)
+            elif nearest_vid is not None and min_ds <= self._v2x_launch_distance:
+                self.get_logger().info(f"[OVERTAKE] Launch distance reached ({min_ds:.1f}m <= {self._v2x_launch_distance:.1f}m)! Full speed ahead.", throttle_duration_sec=1.0)
 
         # Dynamically retrieve vehicle width from bicycle_model (from config.yaml or parameter updates)
         # (prevents kart from trying to squeeze through gaps narrower than the configured vehicle width)

@@ -867,10 +867,22 @@ class ReferencePath:
                         if valid_right and valid_left:
                             C_right = (I_right[0] + I_right[1]) / 2.0
                             C_left = (I_left[0] + I_left[1]) / 2.0
-                            if abs(C_right - C_prev) < abs(C_left - C_prev):
+                            
+                            # Width-biased corridor selection
+                            width_bias_threshold = 0.5  # meters
+                            
+                            if W_left > W_right + width_bias_threshold:
+                                # Left gap is significantly wider, force left
+                                lb_sm, ub_sm = I_left
+                            elif W_right > W_left + width_bias_threshold:
+                                # Right gap is significantly wider, force right
                                 lb_sm, ub_sm = I_right
                             else:
-                                lb_sm, ub_sm = I_left
+                                # Gaps are similar in width, prefer the one closest to the previous center for smoothness
+                                if abs(C_right - C_prev) < abs(C_left - C_prev):
+                                    lb_sm, ub_sm = I_right
+                                else:
+                                    lb_sm, ub_sm = I_left
                         elif valid_right:
                             lb_sm, ub_sm = I_right
                         elif valid_left:

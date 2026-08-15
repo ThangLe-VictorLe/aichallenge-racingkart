@@ -36,12 +36,12 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.45   # artificially squeezed to force strict tracking
+  width: 1.5   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: false
   use_dynamic_steer_gain: true
-  N: 18
+  N: 15
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
@@ -109,7 +109,7 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 0.9           # [m] clearance radius around opponent kart
+  vehicle_radius: 0.5           # [m] clearance radius around opponent kart
   v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
   position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
 
@@ -118,8 +118,13 @@ v2x_obstacle_avoidance:
   # opponent kart is detected AHEAD of us within this along-raceline distance.
   # Hysteresis: activate at activation_distance_m, deactivate at deactivation_distance_m.
   # Set activation_distance_m: 0.0 to fully disable, or a large value to always activate.
-  activation_distance_m: 30.0   # [m] turn ON avoidance when opponent closer than this
-  deactivation_distance_m: 35.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
+  activation_distance_m: 22.0   # [m] turn ON avoidance when opponent closer than this
+  deactivation_distance_m: 27.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
+
+  # --- Tailing & Overtaking Strategy ---
+  tailing_distance_m: 15.0      # [m] distance to start matching opponent's speed
+  launch_distance_m: 8.0        # [m] distance to stop speed matching and execute overtake
+  ignore_tailing_vel_kmh: 10.0  # [km/h] ignore tailing if opponent is slower than this
 
   # --- Overtaking Steer Gain ---
   # Fixed steer gain applied while overtaking is active (overrides per-waypoint gain from steer_gain.yaml).
