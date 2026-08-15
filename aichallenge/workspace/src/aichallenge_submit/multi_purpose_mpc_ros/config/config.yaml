@@ -36,7 +36,7 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.4   # artificially squeezed to force strict tracking
+  width: 1.45   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: false
@@ -109,7 +109,7 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 1.4           # [m] clearance radius around opponent kart
+  vehicle_radius: 0.9           # [m] clearance radius around opponent kart
   v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
   position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
 
@@ -135,7 +135,7 @@ recovery:
   recovery_steer_gain: 2.0       # fixed steer gain override during recovery
   post_recovery_steer_gain: 2.0  # fixed steer gain override AFTER recovery (during cooldown)
   cooldown_sec: 2.0              # [s] cooldown duration after recovery finishes
-  cooldown_Q0: 10000000.0        # Q[0] override during cooldown
+  cooldown_Q0: 0.01        # Q[0] override during cooldown
   disabled_waypoints: []         # disable recovery at race start (waypoints 45 to 50)
 
 # =============================================================================

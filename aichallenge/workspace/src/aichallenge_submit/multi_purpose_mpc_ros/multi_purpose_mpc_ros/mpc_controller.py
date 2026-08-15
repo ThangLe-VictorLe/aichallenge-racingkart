@@ -1187,11 +1187,16 @@ class MPCController(Node):
             nearest_vid = "?"
             for v in getattr(self, '_last_v2x_msg', type('_Empty', (), {'vehicles': []})()).vehicles:
                 opp_x, opp_y = float(v.position.x), float(v.position.y)
+                
+                # Check if this vehicle is actually ego
+                ego_x = self._car.temporal_state.x if self._car else 0.0
+                ego_y = self._car.temporal_state.y if self._car else 0.0
+                if np.hypot(opp_x - ego_x, opp_y - ego_y) < 0.5:
+                    continue
+                    
                 dxy = self._waypoint_xy - np.array([opp_x, opp_y], dtype=np.float64)
                 dists_sq = np.einsum('ij,ij->i', dxy, dxy)
                 nearest_wp = int(np.argmin(dists_sq))
-                if np.sqrt(dists_sq[nearest_wp]) < 0.8:
-                    continue
                 ds = (self._waypoint_s[nearest_wp] - ego_s) % self._total_track_s
                 if ds < min_ds:
                     min_ds = ds
@@ -1489,20 +1494,24 @@ class MPCController(Node):
                 if (now_sec - self._recovering_start_time) < self._recovery_reverse_time_sec:
                     is_recovering = True
                     # AWSIM: REVERSE gear + positive acc/speed moves the kart backward
-                    # Divide by 3.6 because u[0] expects m/s, but reverse_vel is in km/h
                     u[0] = abs(self._recovery_reverse_vel) / 3.6
                     
-                    # If MPC is infeasible (returns 0), we use e_y to steer back towards the path.
-                    # e_y > 0 means we are left of path. In reverse, steering right (negative)
-                    # moves the rear towards the path (to the right).
                     e_y = self._car.spatial_state.e_y
-                    u[1] = 0.5 * e_y
-                    self.get_logger().info(f"[RECOVERY DEBUG] Reverse e_y: {e_y:.3f}, steering to {u[1]:.3f}", throttle_duration_sec=0.5)
+                    e_psi = self._car.spatial_state.e_psi
+                    
+                    # When reversing, steering right (negative) moves the REAR to the right,
+                    # and points the NOSE to the left.
+                    # If e_y > 0 (kart is left of path), we want the rear to go right. Steer right (negative).
+                    # If e_psi > 0 (nose is pointing left), we want nose to go right. Steer left (positive) in reverse.
+                    steer_cmd = 0.0 * e_y + 0.5 * e_psi
+                    u[1] = np.clip(steer_cmd, -0.314, 0.314)
+                    
+                    self.get_logger().info(f"[RECOVERY DEBUG] Reverse e_y: {e_y:.3f}, e_psi: {e_psi:.3f}, steer: {u[1]:.3f}", throttle_duration_sec=0.5)
                     
                     # Override steer gain to fixed recovery gain during recovery
                     self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
                 else:
-                    self.get_logger().info("Wall recovery completed! Switching to DRIVE, resuming normal driving...")
+                    self.get_logger().info("Wall recovery completed! Switching to DRIVE, aligning forward...")
                     self._recovery_state = "COOLDOWN"
                     self._cooldown_start_time = now_sec
                     self._stuck_start_time = None
@@ -1520,19 +1529,50 @@ class MPCController(Node):
             elif self._recovery_state == "COOLDOWN":
                 self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
                 
-                # If MPC is still infeasible/giving zero speed, force it to crawl forward
-                if u[0] < 0.1:
-                    u[0] = 1.0  # 3.6 km/h (crawl speed in m/s)
-                    e_y = self._car.spatial_state.e_y
-                    # In DRIVE, e_y > 0 (left of path) -> steer right (negative) to get to center
-                    u[1] = -0.5 * e_y
-                    self.get_logger().info(f"[RECOVERY DEBUG] Cooldown overriding MPC, forcing forward crawl. e_y: {e_y:.3f}, steer: {u[1]:.3f}", throttle_duration_sec=0.5)
+                # Unconditionally override MPC during COOLDOWN to manually align kart
+                # Crawl forward at 3.6 km/h
+                u[0] = 1.4  
                 
-                if self._cooldown_start_time is not None and (now_sec - self._cooldown_start_time) >= self._recovery_cooldown_sec:
+                e_y = self._car.spatial_state.e_y
+                e_psi = self._car.spatial_state.e_psi
+                
+                # Proportional control for path following in forward gear
+                # If e_y > 0 (left of path), steer right (negative)
+                # If e_psi > 0 (pointing left of path), steer right (negative)
+                steer_cmd = -0.2 * e_y - 0.5 * e_psi
+                u[1] = np.clip(steer_cmd, -0.314, 0.314)
+                
+                self.get_logger().info(f"[RECOVERY DEBUG] Forward Align e_y: {e_y:.3f}, e_psi: {e_psi:.3f}, steer: {u[1]:.3f}", throttle_duration_sec=0.5)
+                
+                # Stuck detection during alignment:
+                if abs(v) < self._recovery_stuck_vel_threshold:
+                    if self._stuck_start_time is None:
+                        self._stuck_start_time = now_sec
+                        self.get_logger().warn("Stuck timer started in COOLDOWN...", throttle_duration_sec=1.0)
+                    elif (now_sec - self._stuck_start_time) >= self._recovery_stuck_time_sec:
+                        self.get_logger().warn("Stuck detected during COOLDOWN! Switching back to RECOVERING...")
+                        self._recovery_state = "RECOVERING"
+                        self._recovering_start_time = now_sec
+                        self._stuck_start_time = None
+                        gear_msg = GearCommand()
+                        gear_msg.stamp = self.get_clock().now().to_msg()
+                        gear_msg.command = GearCommand.REVERSE
+                        self._gear_pub.publish(gear_msg)
+                else:
+                    self._stuck_start_time = None
+
+                # Exit condition: close to centerline and heading aligned
+                is_aligned = abs(e_y) < 1.0 and abs(e_psi) < 0.15
+                is_timeout = self._cooldown_start_time is not None and (now_sec - self._cooldown_start_time) >= 10.0
+                
+                if self._recovery_state == "COOLDOWN" and (is_aligned or is_timeout):
                     self._recovery_state = "NORMAL"
                     self._cooldown_start_time = None
                     self._set_Q0(self._default_Q0)
-                    self.get_logger().info("Recovery cooldown done. Back to NORMAL.")
+                    if is_aligned:
+                        self.get_logger().info("Recovery alignment done. Kart is on centerline. Back to NORMAL.")
+                    else:
+                        self.get_logger().warn("Recovery alignment timed out. Forcing NORMAL.")
 
             elif self._recovery_state == "NORMAL":
                 curr_wp_id = self._mpc.model.wp_id
@@ -1559,7 +1599,7 @@ class MPCController(Node):
                     is_commanding_forward = (u[0] > 3.6 or mpc_exhausted)
 
                     if self._has_moved and is_commanding_forward and abs(v) < self._recovery_stuck_vel_threshold \
-                            and not v2x_suppressed and not corridor_is_too_narrow and self._enable_control:
+                            and not corridor_is_too_narrow and self._enable_control:
                         if self._stuck_start_time is None:
                             self._stuck_start_time = now_sec
                             self.get_logger().warn("Stuck timer started...", throttle_duration_sec=1.0)
