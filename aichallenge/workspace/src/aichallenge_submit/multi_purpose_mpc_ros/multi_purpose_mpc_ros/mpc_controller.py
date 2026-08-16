@@ -532,13 +532,12 @@ class MPCController(Node):
             # Proximity gate params (with hysteresis)
             self._v2x_activation_dist = float(v2x_cfg.activation_distance_m)  # type: ignore
             self._v2x_deactivation_dist = float(v2x_cfg.deactivation_distance_m)  # type: ignore
-            self._overtaking_steer_gain = float(v2x_cfg.overtaking_steer_gain)  # type: ignore
-            
+            self._min_overtaking_steer_gain = float(v2x_cfg.min_overtaking_steer_gain)  # type: ignore
+
             # Tailing & Overtaking Config
             self._v2x_tailing_distance = float(getattr(v2x_cfg, 'tailing_distance_m', 15.0))
             self._v2x_launch_distance = float(getattr(v2x_cfg, 'launch_distance_m', 8.0))
             self._v2x_ignore_tailing_vel = float(getattr(v2x_cfg, 'ignore_tailing_vel_kmh', 10.0))
-            
             # Runtime state
             self._v2x_avoidance_active = False
             # Minimum time (seconds) the V2X active state must hold before it can flip again.
@@ -776,7 +775,6 @@ class MPCController(Node):
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
         import time
         t_v2x_start = time.time()
-        # print(f"[V2X Trace] Received V2X msg with {len(msg.vehicles)} vehicles", flush=True)
         self._v2x_tracker.update(msg)
 
         # === PROXIMITY GATE WITH HYSTERESIS ===
@@ -793,11 +791,11 @@ class MPCController(Node):
         any_opponent_in_activate_range = False
         any_opponent_in_deactivate_range = False
         
-        nearest_opponent_vid = None
-        min_opponent_ds = float('inf')
-        
         ego_x = self._car.temporal_state.x if self._car else 0.0
         ego_y = self._car.temporal_state.y if self._car else 0.0
+
+        min_opponent_ds = float('inf')
+        nearest_opponent_vid = None
 
         for idx, v in enumerate(msg.vehicles):
             opp_x = float(v.position.x)
@@ -806,7 +804,6 @@ class MPCController(Node):
             # Check if this vehicle is actually ego
             dist_to_ego = np.hypot(opp_x - ego_x, opp_y - ego_y)
             if dist_to_ego < 0.5:  # 0.5m threshold to filter out self
-                print(f"[V2X Trace] Skipping vehicle {idx} - Too close to ego (dist: {dist_to_ego:.2f}m). Assumed to be ego.", flush=True)
                 continue
                 
             # Snap opponent to nearest waypoint
@@ -818,16 +815,12 @@ class MPCController(Node):
             # Signed forward distance along raceline; wraps cleanly on circular track
             ds = (opp_s - ego_s) % track_len
             
-            print(f"[V2X Trace] Vehicle {idx} | opp_s: {opp_s:.2f} | ego_s: {ego_s:.2f} | ds: {ds:.2f}m | activate_th: {activate_threshold} | deactivate_th: {deactivate_threshold}", flush=True)
-            
             # ds in (0, track_len): small = just ahead, large = behind us
             # Allow opponent to be slightly behind us (e.g. ds > track_len - 2.0) and still keep avoidance active
             if 0.0 <= ds <= activate_threshold or ds > track_len - 2.0:
                 any_opponent_in_activate_range = True
-                print(f"[V2X Trace] -> Vehicle {idx} triggered ACTIVATE range.", flush=True)
             if 0.0 <= ds <= deactivate_threshold or ds > track_len - 3.0:
                 any_opponent_in_deactivate_range = True
-                print(f"[V2X Trace] -> Vehicle {idx} triggered DEACTIVATE range (kept active).", flush=True)
                 
                 # Track the nearest opponent for speed matching (tailing)
                 actual_ds = ds if ds <= deactivate_threshold else ds - track_len
@@ -861,7 +854,7 @@ class MPCController(Node):
             if self._v2x_avoidance_active:
                 self.get_logger().warn(
                     "[V2X] Overtaking mode ACTIVATED — opponent within "
-                    f"{activate_threshold:.0f} m ahead. Steer gain -> {self._overtaking_steer_gain}")
+                    f"{activate_threshold:.0f} m ahead. Min steer gain -> {self._min_overtaking_steer_gain}")
             else:
                 self.get_logger().info(
                     "[V2X] Overtaking mode DEACTIVATED — no opponent within "
@@ -873,15 +866,11 @@ class MPCController(Node):
         if self._v2x_avoidance_active:
             predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
             new_dynamic = predictions_to_obstacles(predictions, self._v2x_vehicle_radius)
-            print(f"[V2X Trace] V2X active. predictions count: {len(predictions)}, new_dynamic count: {len(new_dynamic)}", flush=True)
             # Only trigger a map rebuild if obstacle positions changed meaningfully (>0.1m).
             # This prevents continuous corridor redraw on every V2X callback when the
             # opponent is stationary or barely moving (e.g. ego kart stopped in manual mode).
             if self._obstacles_changed(new_dynamic):
-                print("[V2X Trace] Obstacles changed! Updating self._dynamic_obstacles.", flush=True)
                 self._dynamic_obstacles = new_dynamic
-            else:
-                print("[V2X Trace] Obstacles did NOT change significantly. Ignored.", flush=True)
         else:
             # Opponent left range — clear dynamic obstacles so map resets to clean static corridor
             if self._dynamic_obstacles:
@@ -893,11 +882,9 @@ class MPCController(Node):
                 msg, ego_wp_id, ego_s, track_len,
                 activate_threshold, deactivate_threshold)
                 
-        if self._v2x_avoidance_active:
-            print(f"[PROFILE] V2X Callback total: {(time.time() - t_v2x_start)*1000:.2f} ms", flush=True)
+        pass
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
-        print(f"[V2X Trace] _filter_obstacles_to_corridor: Input obstacles count: {len(obstacles)}", flush=True)
         if not obstacles or self._waypoint_xy.size == 0:
             return obstacles
         thr_sq = self._v2x_corridor_threshold_sq
@@ -907,7 +894,6 @@ class MPCController(Node):
             dxy = wps - np.array([ob.cx, ob.cy], dtype=np.float64)
             if np.min(np.einsum('ij,ij->i', dxy, dxy)) <= thr_sq:
                 kept.append(ob)
-        print(f"[V2X Trace] _filter_obstacles_to_corridor: Output kept count: {len(kept)}", flush=True)
         return kept
 
     def _obstacles_changed(self, new_obstacles: List[Obstacle], threshold: float = 0.1) -> bool:
@@ -1219,7 +1205,7 @@ class MPCController(Node):
                 if ds < min_ds:
                     min_ds = ds
                     nearest_vid = v.vehicle_id
-            gain = self._overtaking_steer_gain
+            gain = self._mpc_cfg.steering_tire_angle_gain_var
             txt.text = f"V2X: ACTIVE | {nearest_vid} @ {min_ds:.0f}m | steer={gain:.1f}"
             txt.color = ColorRGBA(r=1.0, g=0.3, b=0.0, a=1.0)  # orange-red
         else:
@@ -1369,8 +1355,14 @@ class MPCController(Node):
         # V2X overtaking steer gain takes priority ALWAYS, even during recovery/cooldown,
         # so that overtaking corridor calculations are never disrupted by wall recovery mode.
         if self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
-            self._mpc_cfg.steering_tire_angle_gain_var = self._overtaking_steer_gain
-            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._overtaking_steer_gain
+            if self._steer_gain_configurator is not None:
+                current_gain = self._steer_gain_configurator.get_steer_gain(self._mpc.model.wp_id, interpolate=True)
+            else:
+                current_gain = self._mpc_cfg.steering_tire_angle_gain_var
+            
+            overtaking_gain = max(current_gain, self._min_overtaking_steer_gain)
+            self._mpc_cfg.steering_tire_angle_gain_var = overtaking_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / overtaking_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         elif self._recovery_state == "RECOVERING":
             self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
@@ -1409,8 +1401,6 @@ class MPCController(Node):
         min_corridor_width = (self._car.width + 0.2) if (hasattr(self, '_car') and self._car is not None) else (self._cfg.bicycle_model.width + 0.2)
         curr_width_val = self._compute_corridor_width_at_ego()
         corridor_is_too_narrow = bool(curr_width_val < min_corridor_width) if self.USE_OBSTACLE_AVOIDANCE else False
-        if self._v2x_avoidance_active:
-            print(f"[PROFILE] Corridor width check took: {(time.time() - t_corridor_start)*1000:.2f} ms", flush=True)
 
         if corridor_is_too_narrow:
             if self._recovery_state != "NARROW":
@@ -1458,58 +1448,72 @@ class MPCController(Node):
                 gear_msg.command = GearCommand.DRIVE
                 self._gear_pub.publish(gear_msg)
 
-        with self._stats.time_block("control"):
-            import time
-            t_mpc_start = time.time()
-            dynamic_obs = self._dynamic_obstacles if (self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active) else []
-            u, max_delta = self._mpc.get_control(dynamic_obstacles=dynamic_obs)
-            if self._v2x_avoidance_active:
-                print(f"[PROFILE] MPC get_control took: {(time.time() - t_mpc_start)*1000:.2f} ms", flush=True)
-            # self.get_logger().info(f"u: {u}")
-
+        # === CALCULATE V_MAX TARGET ===
         if self._mpc_cfg.use_csv_velocity:
-            # We use the interpolated vx_mps from the CSV (stored in wp.v_ref)
             current_wp = self._reference_path.waypoints[self._mpc.model.wp_id]
-            ref_vel_kmph = min(current_wp.v_ref * 3.6, self._mpc_cfg.v_max) # m/s to km/h
-            self._mpc.update_v_max(ref_vel_kmph)
-            # Note: We do NOT call set_v_ref to overwrite the whole path.
-            # This allows the MPC to look ahead at the varying velocities in the CSV!
+            # Both are in m/s
+            target_v_max_mps = min(current_wp.v_ref, self._mpc_cfg.v_max)
         else:
             if self._ref_vel_configulator is not None:
                 ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
-                ref_vel_kmph = min(
-                    kmh_to_m_per_sec(ref_vel_mps),
-                    self._mpc_cfg.v_max)
-                self._mpc.update_v_max(ref_vel_kmph)
-                v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
+                target_v_max_mps = min(ref_vel_mps, self._mpc_cfg.v_max)
+                v_ref: List[float] = [target_v_max_mps] * len(self._reference_path.waypoints)
                 self._reference_path.set_v_ref(v_ref)
+            else:
+                target_v_max_mps = self._mpc_cfg.v_max
 
-        # Tail opponent if V2X avoidance is active (Idea A)
+        # === TAILING LOGIC (Idea A) ===
         if self.USE_OBSTACLE_AVOIDANCE and getattr(self, '_v2x_avoidance_active', False):
             nearest_vid = getattr(self, '_nearest_opponent_vid', None)
             min_ds = getattr(self, '_nearest_opponent_ds', float('inf'))
             
-            # If within tailing distance, but not yet in launch distance
             if nearest_vid is not None and self._v2x_launch_distance < min_ds < self._v2x_tailing_distance:
                 opp_vx, opp_vy = self._v2x_tracker.velocity(nearest_vid)
                 opp_speed_mps = np.hypot(opp_vx, opp_vy)
                 opp_speed_kmph = opp_speed_mps * 3.6
                 
-                # Ignore tailing if the opponent is very slow or stopped (e.g. < 10 km/h)
                 if opp_speed_kmph >= self._v2x_ignore_tailing_vel:
-                    # Speed matching: slightly faster than opponent to close the gap, but not ram them
-                    speed_delta = max(0.5, min_ds * 0.1) # 1.5 m/s at 15m, 0.5 m/s at 5m
+                    speed_delta = max(0.5, min_ds * 0.1) # m/s
                     tail_speed_mps = opp_speed_mps + speed_delta
-                    
-                    # Cap the mpc v_max
-                    current_v_max = self._mpc.input_constraints['umax'][0]
-                    new_v_max = min(current_v_max, tail_speed_mps)
-                    self._mpc.update_v_max(new_v_max)
-                    self.get_logger().info(f"[TAILING] Opponent '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Capping v_max to {new_v_max*3.6:.1f} km/h.", throttle_duration_sec=1.0)
+                    target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
+                    self.get_logger().info(f"[TAILING] Opponent '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
                 else:
                     self.get_logger().info(f"[TAILING] Opponent is slow ({opp_speed_kmph:.1f} km/h). Ignoring tailing, executing overtake immediately.", throttle_duration_sec=1.0)
             elif nearest_vid is not None and min_ds <= self._v2x_launch_distance:
-                self.get_logger().info(f"[OVERTAKE] Launch distance reached ({min_ds:.1f}m <= {self._v2x_launch_distance:.1f}m)! Full speed ahead.", throttle_duration_sec=1.0)
+                self.get_logger().info(f"[TAILING] OVERTAKE! Launch distance reached ({min_ds:.1f}m <= {self._v2x_launch_distance:.1f}m)! Full speed ahead.", throttle_duration_sec=1.0)
+
+        # === SMOOTH RAMP DOWN OF V_MAX ===
+        # If we instantly drop v_max in the MPC constraints, the solver assumes the kart is ALREADY slow
+        # and plans tight steering. But the physical kart is still flying at high speed, causing a crash!
+        # We must limit the drop rate of v_max to what the physical kart can actually brake.
+        dt = 1.0 / self._mpc_cfg.control_rate
+        # max_decel_step_mps is the maximum drop in speed (m/s) per control cycle.
+        # Use a conservative limit (0.8x of physical a_min) so the PID can keep up.
+        max_decel_step_mps = abs(self._mpc_cfg.a_min) * dt * 0.8
+        
+        # Start the ramp down from the kart's actual physical speed (plus a small margin) 
+        # instead of the previously commanded v_max, so the MPC doesn't assume we are braking
+        # from a speed we never actually reached.
+        current_v_max_mps = self._mpc.input_constraints['umax'][0]
+        actual_speed_mps = abs(v)
+        effective_start_v_max = min(current_v_max_mps, actual_speed_mps + 1.0)
+        
+        if target_v_max_mps < effective_start_v_max:
+            new_v_max_mps = max(target_v_max_mps, effective_start_v_max - max_decel_step_mps)
+        else:
+            new_v_max_mps = target_v_max_mps
+            
+        if self.USE_OBSTACLE_AVOIDANCE and getattr(self, '_v2x_avoidance_active', False):
+            # Print detailed tailing speed logs
+            if self._loop % (self._mpc_cfg.control_rate // 2) == 0:
+                print(f"[TAILING-SPEED] actual_v: {actual_speed_mps*3.6:.1f} | current_v_max: {current_v_max_mps*3.6:.1f} | eff_start: {effective_start_v_max*3.6:.1f} | target_v_max: {target_v_max_mps*3.6:.1f} | new_v_max: {new_v_max_mps*3.6:.1f} (km/h)", flush=True)
+            
+        self._mpc.update_v_max(new_v_max_mps)
+
+        # === MPC SOLVER ===
+        with self._stats.time_block("control"):
+            dynamic_obs = self._dynamic_obstacles if (self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active) else []
+            u, max_delta = self._mpc.get_control(dynamic_obstacles=dynamic_obs)
 
         # Dynamically retrieve vehicle width from bicycle_model (from config.yaml or parameter updates)
         # (prevents kart from trying to squeeze through gaps narrower than the configured vehicle width)
@@ -1607,7 +1611,7 @@ class MPCController(Node):
                     self._stuck_start_time = None
 
                 # Exit condition: close to centerline and heading aligned
-                is_aligned = abs(e_y) < 1.0 and abs(e_psi) < 0.15
+                is_aligned = abs(e_y) < 2.0 and abs(e_psi) < 0.15
                 is_timeout = self._cooldown_start_time is not None and (now_sec - self._cooldown_start_time) >= 10.0
                 
                 if self._recovery_state == "COOLDOWN" and (is_aligned or is_timeout):

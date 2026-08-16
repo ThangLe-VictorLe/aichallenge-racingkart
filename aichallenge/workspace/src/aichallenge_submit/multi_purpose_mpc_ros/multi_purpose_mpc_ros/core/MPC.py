@@ -260,8 +260,6 @@ class MPC:
         len_eq = len(leq)
         l_ey = l[len_eq + self.nx : len_eq + self.nx*(N+1) : self.nx]
         u_ey = u[len_eq + self.nx : len_eq + self.nx*(N+1) : self.nx]
-        print(f"[MPC DEBUG] Solver l_ey (first 5): {l_ey[:5]}", flush=True)
-        print(f"[MPC DEBUG] Solver u_ey (first 5): {u_ey[:5]}", flush=True)
 
         # コスト行列
         P = self._P_cached
@@ -277,7 +275,6 @@ class MPC:
         self.optimizer = osqp.OSQP()
         self.optimizer.setup(P=P, q=q, A=A_full, l=l, u=u, verbose=False)
         t_setup_end = time.time()
-        print(f"[MPC INIT PROFILE] path_constraints: {(t_path_end - t_start)*1000:.2f}ms | matrix_build: {(t_matrix_end - t_path_end)*1000:.2f}ms | osqp_setup: {(t_setup_end - t_matrix_end)*1000:.2f}ms", flush=True)
         return P, q, A_full, l, u
 
     def get_control(self, dynamic_obstacles=None) -> Tuple[np.ndarray, float]:
@@ -304,17 +301,12 @@ class MPC:
         P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], self.model.safety_margin, dynamic_obstacles=dynamic_obstacles)
         t_init_end = time.time()
 
-        print(f"[MPC DEBUG] get_control (wp_id={self.model.wp_id}, N={N}) ===", flush=True)
-        if self.current_lb is not None and self.current_ub is not None:
-            print(f"[MPC DEBUG] LB (first 5): {self.current_lb[:5]}", flush=True)
-            print(f"[MPC DEBUG] UB (first 5): {self.current_ub[:5]}", flush=True)
+
 
         try:
             t_solve_start = time.time()
             dec = self.optimizer.solve()
             t_solve_end = time.time()
-            print(f"[MPC PROFILE] t2s: {(t_t2s_end - t_t2s_start)*1000:.2f}ms | init_prob: {(t_init_end - t_init_start)*1000:.2f}ms | solve: {(t_solve_end - t_solve_start)*1000:.2f}ms", flush=True)
-            print(f"[MPC DEBUG] OSQP status: {dec.info.status}", flush=True)
 
             control_signals = np.array(dec.x[-N*nu:])
             use_control_signals = control_signals[1::2]
@@ -324,13 +316,10 @@ class MPC:
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
                     self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], relaxed_safety_margin, dynamic_obstacles=dynamic_obstacles)
                     dec = self.optimizer.solve()
-                    print(f"[MPC DEBUG] OSQP status (relaxed {i}/5): {dec.info.status}", flush=True)
                     control_signals = np.array(dec.x[-N*nu:])
                     use_control_signals = control_signals[1::2]
 
                     if self.infeasibility_counter == 0 and np.all(use_control_signals):
-                        if self.last_solved_wp_id != self.model.wp_id:
-                            print(f"[MPC DEBUG] Relaxed safety margin by {relaxed_safety_margin} ({5-i}/5) to solve the problem")
                         break
 
             # ステア角の計算と保存
@@ -353,22 +342,9 @@ class MPC:
             self.current_prediction_raw = x
             self.current_prediction = self.update_prediction(x, N)
 
-            print(f"[MPC DEBUG] Predicted e_y (first 5): {x[1:6, 0]}", flush=True)
-            violations = []
-            if self.current_lb is not None and self.current_ub is not None:
-                for n in range(N):
-                    if x[n+1, 0] > self.current_ub[n] + 1e-3 or x[n+1, 0] < self.current_lb[n] - 1e-3:
-                        violations.append((n, x[n+1, 0], self.current_lb[n], self.current_ub[n]))
-                if violations:
-                    print(f"[MPC DEBUG] WARNING: Prediction violates bounds! {len(violations)} violations. First: {violations[0]}", flush=True)
-                else:
-                    print("[MPC DEBUG] Prediction respects bounds.", flush=True)
-
             u = np.array([v, delta])
             max_delta = np.max(np.abs(control_signals[1:len(control_signals)//3*2:2]))
 
-            if self.infeasibility_counter > (N - 1):
-                print(f'[MPC DEBUG] Problem solved after {self.infeasibility_counter} infeasible iterations')
             self.infeasibility_counter = 0
             self.last_solved_wp_id = self.model.wp_id
 
