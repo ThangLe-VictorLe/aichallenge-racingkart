@@ -36,7 +36,7 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.5   # artificially squeezed to force strict tracking
+  width: 1.6   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: false
@@ -64,9 +64,9 @@ mpc:
   ## ---------- 究極 ------------- ##
   ## Lap1: 53s, Lap2: 47s
 
-  v_max: 50.0   # km/h
+  v_max: 40.0   # km/h
   ay_max: 22.0 # m/s^2, maximum lateral acceleration in curves
-  Q: [600000.0, 80000000.0, 2000000.0]
+  Q: [500000.0, 80000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##
@@ -109,7 +109,7 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 0.5           # [m] clearance radius around opponent kart
+  vehicle_radius: 0.35           # [m] clearance radius around opponent kart
   v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
   position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
 
@@ -122,14 +122,15 @@ v2x_obstacle_avoidance:
   deactivation_distance_m: 27.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
 
   # --- Tailing & Overtaking Strategy ---
-  tailing_distance_m: 15.0      # [m] distance to start matching opponent's speed
+  tailing_distance_m: 22.0      # [m] distance to start matching opponent's speed
   launch_distance_m: 8.0        # [m] distance to stop speed matching and execute overtake
-  ignore_tailing_vel_kmh: 10.0  # [km/h] ignore tailing if opponent is slower than this
+  ignore_tailing_vel_kmh: 11.0  # [km/h] ignore tailing if opponent is slower than this
 
   # --- Overtaking Steer Gain ---
-  # Fixed steer gain applied while overtaking is active (overrides per-waypoint gain from steer_gain.yaml).
+  # Minimum steer gain applied while overtaking is active. It uses the gain from steer_gain.yaml, 
+  # but if that gain is less than min_overtaking_steer_gain, it uses min_overtaking_steer_gain.
   # Tune this to get smooth steering response during the overtake maneuver.
-  overtaking_steer_gain: 1.5    # [-] steer gain multiplier during active overtake
+  min_overtaking_steer_gain: 2.0    # [-] min steer gain multiplier during active overtake
 
 recovery:
   enable: true
