@@ -36,7 +36,7 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.6   # artificially squeezed to force strict tracking
+  width: 1.55   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: false
@@ -64,7 +64,7 @@ mpc:
   ## ---------- 究極 ------------- ##
   ## Lap1: 53s, Lap2: 47s
 
-  v_max: 40.0   # km/h
+  v_max: 36.0   # km/h
   ay_max: 22.0 # m/s^2, maximum lateral acceleration in curves
   Q: [500000.0, 80000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
@@ -109,7 +109,7 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 0.35           # [m] clearance radius around opponent kart
+  vehicle_radius: 0.3           # [m] clearance radius around opponent kart
   v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
   position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
 

@@ -119,6 +119,7 @@ class Waypoint:
         self.y = y
         self.psi = psi
         self.kappa = kappa
+        self.s = 0.0
 
         # Reference velocity at this waypoint according to speed profile
         self.v_ref = None
@@ -204,6 +205,13 @@ class ReferencePath:
 
         # Length of path
         self.length, self.segment_lengths = self._compute_length()
+        
+        # Populate Frenet s for each waypoint
+        current_s = 0.0
+        for i, wp in enumerate(self.waypoints):
+            wp.s = current_s
+            if i < len(self.segment_lengths) - 1:
+                current_s += self.segment_lengths[i+1]
 
         # Compute path width (attribute of each waypoint)
         self._compute_width(max_width=max_width)
@@ -846,11 +854,20 @@ class ReferencePath:
                     dy = obs.cy - wp.y
                     
                     # Project obstacle center onto path coordinate frame
-                    s_dist = dx * np.cos(wp.psi) + dy * np.sin(wp.psi)
+                    s_dist_proj = dx * np.cos(wp.psi) + dy * np.sin(wp.psi)
                     d_dist = -dx * np.sin(wp.psi) + dy * np.cos(wp.psi)
                     
                     # Effective radius including safety margin
                     R_eff = obs.radius + safety_margin
+                    
+                    # Calculate true along-track distance to prevent ghost obstacles on sharp curves
+                    if hasattr(wp, 's') and hasattr(obs, 's') and obs.s is not None:
+                        s_dist = wp.s - obs.s
+                        # Handle circular track wrap-around
+                        if self.circular:
+                            s_dist = (s_dist + self.length / 2) % self.length - self.length / 2
+                    else:
+                        s_dist = s_dist_proj
                     
                     if abs(s_dist) < R_eff:
                         w = np.sqrt(R_eff**2 - s_dist**2)
