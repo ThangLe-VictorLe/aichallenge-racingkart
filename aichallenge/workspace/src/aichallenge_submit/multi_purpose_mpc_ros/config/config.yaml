@@ -130,7 +130,12 @@ v2x_obstacle_avoidance:
   # Minimum steer gain applied while overtaking is active. It uses the gain from steer_gain.yaml, 
   # but if that gain is less than min_overtaking_steer_gain, it uses min_overtaking_steer_gain.
   # Tune this to get smooth steering response during the overtake maneuver.
-  min_overtaking_steer_gain: 2.0    # [-] min steer gain multiplier during active overtake
+  min_overtaking_steer_gain: 2.2    # [-] min steer gain multiplier during active overtake
+
+  # --- No-Overtake Zones ---
+  # List of Frenet s-coordinate intervals [start_s, end_s] where overtaking is disabled.
+  # The kart will patiently tail the opponent instead of forcing a pass in dangerous corners.
+  no_overtake_zones: [[115.0, 125.0],[150.0, 165.0],[200.0, 205.0],[250.0, 270.0],[300.0, 335.0]]
 
 recovery:
   enable: true

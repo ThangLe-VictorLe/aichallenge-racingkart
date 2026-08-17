@@ -105,5 +105,5 @@ def predictions_to_obstacles(predictions, vehicle_radius: float, obstacle_cls=No
     out = []
     for _vid, points in predictions.items():
         for x, y in points:
-            out.append(obstacle_cls(cx=x, cy=y, radius=vehicle_radius))
+            out.append(obstacle_cls(cx=x, cy=y, radius=vehicle_radius, vid=_vid))
     return out
