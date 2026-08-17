@@ -54,9 +54,6 @@ class SteerGainConfigurator:
         self._ref_vel_map = self._load_ref_vel_map()
         self._label_step = 5
 
-        # Lap-aware gain: starts at lap 1 (cold tires), switches to gain_warm on lap 2+
-        self._current_lap: int = 1
-
         self._sorted_wp_id_gain_map: OrderedDict[int, float] = OrderedDict()
         self._setup_publisher()
         self._register_params()
@@ -65,24 +62,7 @@ class SteerGainConfigurator:
         self._section_marker_array = MarkerArray()
         self._update_marker()
         self._timer = self._node.create_timer(2.0, self._timer_callback)
-
-    def set_lap(self, lap: int) -> None:
-        """Called by mpc_controller when a new lap starts.
-        Switches between cold-tire gains (lap 1) and warm-tire gains (lap 2+).
-        """
-        if lap == self._current_lap:
-            return
-        self._current_lap = lap
-        tier = "warm" if lap >= 2 else "cold"
-        self._node.get_logger().info(
-            f"\033[36m[SteerGainConfigurator] Lap {lap} — switching to {tier}-tire gains\033[0m"
-        )
-        self._update_marker()  # rebuilds _sorted_wp_id_gain_map with new effective gains
-
     def _get_effective_gain(self, section_dict: dict) -> float:
-        """Return gain_warm if lap >= 2 and the field exists, else fall back to gain."""
-        if self._current_lap >= 2 and "gain_warm" in section_dict:
-            return float(section_dict["gain_warm"])
         return float(section_dict["gain"])
 
     @classmethod

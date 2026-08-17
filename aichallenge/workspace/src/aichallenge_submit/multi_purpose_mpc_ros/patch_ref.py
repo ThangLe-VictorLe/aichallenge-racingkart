@@ -1,91 +1,132 @@
-import re
+import sys
 
 with open("/mnt/ZorinData/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/core/reference_path.py", "r") as f:
     content = f.read()
 
-# Add s to Waypoint.__init__
-old_wp_init = """        self.psi = psi
-        self.kappa = kappa
+# 1. Add obstacle_choices dictionary
+old_vars = """        has_printed_corridor_choice = False
 
-        # Reference velocity at this waypoint according to speed profile
-        self.v_ref = None"""
+        # container for constraints and border cells"""
 
-new_wp_init = """        self.psi = psi
-        self.kappa = kappa
-        self.s = 0.0
+new_vars = """        has_printed_corridor_choice = False
+        obstacle_choices = {} # mapping vid to chosen_side
 
-        # Reference velocity at this waypoint according to speed profile
-        self.v_ref = None"""
+        # container for constraints and border cells"""
 
-content = content.replace(old_wp_init, new_wp_init)
+content = content.replace(old_vars, new_vars)
 
-# Populate wp.s in ReferencePath.__init__
-old_ref_init = """        # List of waypoint objects
-        self.waypoints = self._construct_path(wp_x, wp_y, wp_v)
 
-        # Number of waypoints
-        self.n_waypoints = len(self.waypoints)
+# 2. Update corridor selection logic
+old_logic = """                        chosen_side = "NONE"
+                        
+                        if valid_right and valid_left:
+                            C_right = (I_right[0] + I_right[1]) / 2.0
+                            C_left = (I_left[0] + I_left[1]) / 2.0
+                            
+                            # Width-biased corridor selection
+                            width_bias_threshold = 0.2  # meters
+                            
+                            if W_left > W_right + width_bias_threshold:
+                                # Left gap is significantly wider, force left
+                                lb_sm, ub_sm = I_left
+                                chosen_side = "LEFT"
+                            elif W_right > W_left + width_bias_threshold:
+                                # Right gap is significantly wider, force right
+                                lb_sm, ub_sm = I_right
+                                chosen_side = "RIGHT"
+                            else:
+                                # Gaps are similar in width, prefer the one closest to the previous center for smoothness
+                                if abs(C_right - C_prev) < abs(C_left - C_prev):
+                                    lb_sm, ub_sm = I_right
+                                    chosen_side = "RIGHT (smooth)"
+                                else:
+                                    lb_sm, ub_sm = I_left
+                                    chosen_side = "LEFT (smooth)"
+                        elif valid_right:
+                            lb_sm, ub_sm = I_right
+                            chosen_side = "RIGHT (only valid)"
+                        elif valid_left:
+                            lb_sm, ub_sm = I_left
+                            chosen_side = "LEFT (only valid)"
+                        else:
+                            # Infeasible
+                            lb_sm, ub_sm = 0.0, 0.0
+                            chosen_side = "INFEASIBLE"
+                        
+                        if not has_printed_corridor_choice and chosen_side != "NONE":
+                            print(f"[TAILING-CORRIDOR] ego_wp: {wp_id} | wp_id: {wp_id + n} | Chosen: {chosen_side} | W_left: {W_left:.2f}m, W_right: {W_right:.2f}m", flush=True)
+                            has_printed_corridor_choice = True"""
 
-        # Length of path
-        self.length, self.segment_lengths = self._compute_length()"""
+new_logic = """                        chosen_side = "NONE"
+                        force_side = None
+                        
+                        if getattr(obs, 'vid', None) is not None:
+                            force_side = obstacle_choices.get(obs.vid)
 
-new_ref_init = """        # List of waypoint objects
-        self.waypoints = self._construct_path(wp_x, wp_y, wp_v)
+                        if force_side is not None:
+                            if "LEFT" in force_side:
+                                if valid_left:
+                                    lb_sm, ub_sm = I_left
+                                    chosen_side = force_side
+                                elif valid_right:
+                                    lb_sm, ub_sm = I_right
+                                    chosen_side = "RIGHT (fallback)"
+                                else:
+                                    lb_sm, ub_sm = 0.0, 0.0
+                                    chosen_side = "INFEASIBLE"
+                            else: # RIGHT
+                                if valid_right:
+                                    lb_sm, ub_sm = I_right
+                                    chosen_side = force_side
+                                elif valid_left:
+                                    lb_sm, ub_sm = I_left
+                                    chosen_side = "LEFT (fallback)"
+                                else:
+                                    lb_sm, ub_sm = 0.0, 0.0
+                                    chosen_side = "INFEASIBLE"
+                        else:
+                            if valid_right and valid_left:
+                                C_right = (I_right[0] + I_right[1]) / 2.0
+                                C_left = (I_left[0] + I_left[1]) / 2.0
+                                
+                                # Width-biased corridor selection
+                                width_bias_threshold = 0.2  # meters
+                                
+                                if W_left > W_right + width_bias_threshold:
+                                    lb_sm, ub_sm = I_left
+                                    chosen_side = "LEFT"
+                                elif W_right > W_left + width_bias_threshold:
+                                    lb_sm, ub_sm = I_right
+                                    chosen_side = "RIGHT"
+                                else:
+                                    if abs(C_right - C_prev) < abs(C_left - C_prev):
+                                        lb_sm, ub_sm = I_right
+                                        chosen_side = "RIGHT (smooth)"
+                                    else:
+                                        lb_sm, ub_sm = I_left
+                                        chosen_side = "LEFT (smooth)"
+                            elif valid_right:
+                                lb_sm, ub_sm = I_right
+                                chosen_side = "RIGHT (only valid)"
+                            elif valid_left:
+                                lb_sm, ub_sm = I_left
+                                chosen_side = "LEFT (only valid)"
+                            else:
+                                lb_sm, ub_sm = 0.0, 0.0
+                                chosen_side = "INFEASIBLE"
+                                
+                            if getattr(obs, 'vid', None) is not None and chosen_side not in ["NONE", "INFEASIBLE"] and "(fallback)" not in chosen_side:
+                                obstacle_choices[obs.vid] = chosen_side
+                        
+                        if not has_printed_corridor_choice and chosen_side != "NONE":
+                            print(f"[TAILING-CORRIDOR] ego_wp: {wp_id} | wp_id: {wp_id + n} | Chosen: {chosen_side} | W_left: {W_left:.2f}m, W_right: {W_right:.2f}m", flush=True)
+                            has_printed_corridor_choice = True"""
 
-        # Number of waypoints
-        self.n_waypoints = len(self.waypoints)
-
-        # Length of path
-        self.length, self.segment_lengths = self._compute_length()
-        
-        # Populate Frenet s for each waypoint
-        current_s = 0.0
-        for i, wp in enumerate(self.waypoints):
-            wp.s = current_s
-            if i < len(self.segment_lengths) - 1:
-                current_s += self.segment_lengths[i+1]"""
-
-content = content.replace(old_ref_init, new_ref_init)
-
-# Use wp.s and obs.s to filter ghost obstacles in update_path_constraints
-old_constraints = """            if dynamic_obstacles is not None:
-                for obs in dynamic_obstacles:
-                    dx = obs.cx - wp.x
-                    dy = obs.cy - wp.y
-                    
-                    # Project obstacle center onto path coordinate frame
-                    s_dist = dx * np.cos(wp.psi) + dy * np.sin(wp.psi)
-                    d_dist = -dx * np.sin(wp.psi) + dy * np.cos(wp.psi)
-                    
-                    # Effective radius including safety margin
-                    R_eff = obs.radius + safety_margin
-                    
-                    if abs(s_dist) < R_eff:"""
-
-new_constraints = """            if dynamic_obstacles is not None:
-                for obs in dynamic_obstacles:
-                    dx = obs.cx - wp.x
-                    dy = obs.cy - wp.y
-                    
-                    # Project obstacle center onto path coordinate frame
-                    s_dist_proj = dx * np.cos(wp.psi) + dy * np.sin(wp.psi)
-                    d_dist = -dx * np.sin(wp.psi) + dy * np.cos(wp.psi)
-                    
-                    # Effective radius including safety margin
-                    R_eff = obs.radius + safety_margin
-                    
-                    # Calculate true along-track distance to prevent ghost obstacles on sharp curves
-                    if hasattr(wp, 's') and hasattr(obs, 's') and obs.s is not None:
-                        s_dist = wp.s - obs.s
-                        # Handle circular track wrap-around
-                        if self.circular:
-                            s_dist = (s_dist + self.length / 2) % self.length - self.length / 2
-                    else:
-                        s_dist = s_dist_proj
-                    
-                    if abs(s_dist) < R_eff:"""
-
-content = content.replace(old_constraints, new_constraints)
+if old_logic in content:
+    content = content.replace(old_logic, new_logic)
+else:
+    print("Failed to replace logic!")
+    sys.exit(1)
 
 with open("/mnt/ZorinData/aichallenge-racingkart/aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/multi_purpose_mpc_ros/core/reference_path.py", "w") as f:
     f.write(content)
