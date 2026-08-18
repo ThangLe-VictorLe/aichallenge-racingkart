@@ -494,6 +494,10 @@ class MPCController(Node):
 
         self._trajectory: Optional[Trajectory] = None
         self._path_constraints = None
+        
+        # Unconditionally initialize _waypoint_xy for prediction marker publishing
+        wps = self._reference_path.waypoints
+        self._waypoint_xy = np.asarray([(wp.x, wp.y) for wp in wps], dtype=np.float64)
 
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
@@ -521,9 +525,7 @@ class MPCController(Node):
             self._v2x_corridor_threshold_sq = (
                 ref_max_width / 2.0 + self._v2x_vehicle_radius + 0.5
             ) ** 2
-            wps = self._reference_path.waypoints
-            self._waypoint_xy = np.asarray(
-                [(wp.x, wp.y) for wp in wps], dtype=np.float64)
+
             # Build cumulative arc-length array for Frenet-frame proximity check
             diffs = np.diff(self._waypoint_xy, axis=0)
             seg_lengths = np.hypot(diffs[:, 0], diffs[:, 1])
@@ -536,9 +538,24 @@ class MPCController(Node):
 
             # Tailing & Overtaking Config
             self._v2x_tailing_distance = float(getattr(v2x_cfg, 'tailing_distance_m', 15.0))
-            self._v2x_launch_distance = float(getattr(v2x_cfg, 'launch_distance_m', 8.0))
+            self._v2x_tailing_speed_gain = float(getattr(v2x_cfg, 'tailing_speed_gain', 0.1))
+            self._v2x_tailing_speed_min_delta = float(getattr(v2x_cfg, 'tailing_speed_min_delta', 0.5))
             self._v2x_ignore_tailing_vel = float(getattr(v2x_cfg, 'ignore_tailing_vel_kmh', 10.0))
             self._no_overtake_zones = getattr(v2x_cfg, 'no_overtake_zones', [])
+            self._corridor_bias = getattr(v2x_cfg, 'corridor_bias', [])
+            
+            # Dynamic Launch & N-Step
+            dyn_launch = getattr(v2x_cfg, 'dynamic_launch', None)
+            if dyn_launch is not None:
+                self._v2x_fast_oppo_vel = float(getattr(dyn_launch, 'fast_oppo_vel_kmh', 26.0))
+                self._v2x_fast_oppo_n = float(getattr(dyn_launch, 'fast_oppo_n', 20))
+                self._v2x_slow_oppo_vel = float(getattr(dyn_launch, 'slow_oppo_vel_kmh', 5.0))
+                self._v2x_slow_oppo_n = float(getattr(dyn_launch, 'slow_oppo_n', 50))
+            else:
+                self._v2x_fast_oppo_vel = 26.0
+                self._v2x_fast_oppo_n = 20
+                self._v2x_slow_oppo_vel = 5.0
+                self._v2x_slow_oppo_n = 50
             # Runtime state
             self._v2x_avoidance_active = False
             self._is_launch_mode_active = False
@@ -857,7 +874,7 @@ class MPCController(Node):
             if self._v2x_avoidance_active:
                 self.get_logger().warn(
                     "[V2X] Overtaking mode ACTIVATED — opponent within "
-                    f"{activate_threshold:.0f} m ahead. Min steer gain -> {self._min_overtaking_steer_gain}")
+                    f"{activate_threshold:.0f} m ahead.")
             else:
                 self.get_logger().info(
                     "[V2X] Overtaking mode DEACTIVATED — no opponent within "
@@ -1350,6 +1367,8 @@ class MPCController(Node):
                 sys.exit(1)
             # plot_reference_path(self._car)
 
+        if hasattr(self, '_mpc') and hasattr(self, '_corridor_bias'):
+            self._mpc.model.reference_path.corridor_bias = self._corridor_bias
 
         if self.USE_OBSTACLE_AVOIDANCE:
             self._reference_path.reset_dynamic_constraints()
@@ -1482,15 +1501,13 @@ class MPCController(Node):
         is_overtaking_active = False
         self._is_launch_mode_active = False
         in_no_overtake_zone = False
+        self._current_launch_N = None
         
         ego_wp_id = self._mpc.model.wp_id if self._mpc is not None else 0
-        ego_s = getattr(self, '_waypoint_s', np.array([]))
-        if ego_s.size > 0:
-            current_s = ego_s[min(ego_wp_id, len(ego_s) - 1)]
-            for zone in getattr(self, '_no_overtake_zones', []):
-                if len(zone) == 2 and zone[0] <= current_s <= zone[1]:
-                    in_no_overtake_zone = True
-                    break
+        for zone in getattr(self, '_no_overtake_zones', []):
+            if len(zone) == 2 and zone[0] <= ego_wp_id <= zone[1]:
+                in_no_overtake_zone = True
+                break
 
         if self.USE_OBSTACLE_AVOIDANCE and getattr(self, '_v2x_avoidance_active', False) and getattr(self, '_recovery_state', "NORMAL") == "NORMAL":
             nearest_vid = getattr(self, '_nearest_opponent_vid', None)
@@ -1501,40 +1518,60 @@ class MPCController(Node):
                 opp_speed_mps = np.hypot(opp_vx, opp_vy)
                 opp_speed_kmph = opp_speed_mps * 3.6
                 
-                launch_distance_reached = (min_ds <= self._v2x_launch_distance)
+                # Interpolate dynamic N between slow_n and fast_n
+                launch_N_raw = np.interp(
+                    opp_speed_kmph, 
+                    [self._v2x_slow_oppo_vel, self._v2x_fast_oppo_vel], 
+                    [self._v2x_slow_oppo_n, self._v2x_fast_oppo_n]
+                )
+                self._current_launch_N = int(round(launch_N_raw))
                 
-                speed_delta = max(0.5, min_ds * 0.1) # m/s
+                # Convert the N-steps into a spatial launch distance
+                dt = 1.0 / self._mpc_cfg.control_rate # 0.025s
+                dynamic_launch_dist = self._current_launch_N * dt * target_v_max_mps
+                
+                # Add hysteresis so it doesn't flutter on/off at the boundary
+                hysteresis_dist = dynamic_launch_dist + 4.0 if getattr(self, '_prev_launch_mode_active', False) else dynamic_launch_dist
+                launch_distance_reached = (min_ds <= hysteresis_dist)
+                
+                if in_no_overtake_zone:
+                    # Conservative tailing for distance keeping (hardcoded)
+                    speed_delta = max(0.5, min_ds * 0.1) # m/s
+                else:
+                    # Aggressive tailing for gaining up velocity for a pass (config based)
+                    speed_delta = max(self._v2x_tailing_speed_min_delta, min_ds * self._v2x_tailing_speed_gain) # m/s
+                
                 tail_speed_mps = opp_speed_mps + speed_delta
                 
                 if not in_no_overtake_zone:
-                    oppo_too_slow_outside = (opp_speed_kmph < self._v2x_ignore_tailing_vel)
-                    if launch_distance_reached or oppo_too_slow_outside:
+                    if launch_distance_reached:
                         # Launch mode activate!
                         self._is_launch_mode_active = True
                         is_overtaking_active = True
                         # target_v_max_mps remains self._mpc_cfg.v_max
-                        self.get_logger().info(f"[LAUNCH MODE] Launch distance reached ({min_ds:.1f}m) or opponent slow! Full speed & min steer gain.", throttle_duration_sec=1.0)
+                        self.get_logger().info(f"[LAUNCH MODE] Launch distance reached ({min_ds:.1f}m)! Full speed & min steer gain: {self._min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
                     else:
                         # Tailing outside no overtake zone
                         if min_ds < self._v2x_tailing_distance:
                             target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
                             self.get_logger().info(f"[TAILING] Opponent '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
                 else: # Inside no overtake zone
-                    # Inside the zone, ONLY trigger emergency pass if opponent is practically crashed (< 2.0 km/h).
+                    # Inside the zone, ONLY trigger emergency pass if opponent is practically crashed.
                     # Using ignore_tailing_vel (11 km/h) here causes false overtakes because karts naturally slow down in corners!
-                    oppo_crashed_inside = (opp_speed_kmph < 2.0)
-                    if oppo_crashed_inside and min_ds < self._v2x_launch_distance:
-                        # Overtake (Emergency Pass)
+                    oppo_crashed_inside = (opp_speed_kmph < 5.0)
+                    
+                    if oppo_crashed_inside:
+                        # Overtake (Emergency Pass) immediately! Do not wait for launch distance because tailing will slow us down to 0 and the dynamic launch distance will shrink to 0!
                         self._is_launch_mode_active = True
                         is_overtaking_active = True
-                        self.get_logger().info(f"[LAUNCH MODE] No-Overtake Zone Override (s={current_s:.1f})! Opponent crashed/slow. Executing pass.", throttle_duration_sec=1.0)
+                        self.get_logger().info(f"[LAUNCH MODE] No-Overtake Zone Override (wp={ego_wp_id})! Opponent crashed/slow. Executing pass immediately. Min steer gain: {self._min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
                     elif min_ds < self._v2x_tailing_distance:
                         # Tailing inside no overtake zone
                         target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
-                        self.get_logger().info(f"[TAILING] No-Overtake Zone (s={current_s:.1f}). Tailing '{nearest_vid}' at {min_ds:.1f}m. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
+                        self.get_logger().info(f"[TAILING] No-Overtake Zone (wp={ego_wp_id}). Tailing '{nearest_vid}' at {min_ds:.1f}m. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
 
         if getattr(self, '_prev_launch_mode_active', False) and not self._is_launch_mode_active:
-            self.get_logger().info("[LAUNCH MODE] Overtaking maneuver finished. Returning to normal steer gain.")
+            self.get_logger().info("[LAUNCH MODE] Overtaking maneuver finished. Returning to normal steer gain.", throttle_duration_sec=2.0)
         self._prev_launch_mode_active = self._is_launch_mode_active
 
         # === SMOOTH RAMP DOWN OF V_MAX ===
@@ -1570,7 +1607,8 @@ class MPCController(Node):
         # === MPC SOLVER ===
         with self._stats.time_block("control"):
             dynamic_obs = self._dynamic_obstacles if (self.USE_OBSTACLE_AVOIDANCE and is_overtaking_active) else []
-            u, max_delta = self._mpc.get_control(dynamic_obstacles=dynamic_obs)
+            launch_n_arg = getattr(self, '_current_launch_N', None) if is_overtaking_active else None
+            u, max_delta = self._mpc.get_control(dynamic_obstacles=dynamic_obs, launch_N=launch_n_arg)
 
         # Dynamically retrieve vehicle width from bicycle_model (from config.yaml or parameter updates)
         # (prevents kart from trying to squeeze through gaps narrower than the configured vehicle width)
@@ -1700,9 +1738,10 @@ class MPCController(Node):
                     v2x_suppressed = self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active
                     
                     # When MPC crashes (infeasibility), it uses leftover predictions for up to 1.25s (50 frames).
-                    # During this playback, the planned velocity might dip below 3.6 km/h, which would reset the stuck timer!
-                    # If the solver is failing (infeasibility_counter > 0), we must keep the stuck timer running regardless of the leftover u[0].
-                    is_commanding_forward = (u[0] > 3.6 or self._mpc.infeasibility_counter > 0)
+                    # During this playback, the planned velocity might dip, which would reset the stuck timer!
+                    # If the solver is failing (infeasibility_counter > 0), we must keep the stuck timer running.
+                    # We use target_v_max_mps (intent) rather than u[0] (output) because if stuck against a wall, MPC might brake (u[0]=0).
+                    is_commanding_forward = (target_v_max_mps > 1.0 or self._mpc.infeasibility_counter > 0)
 
                     if self._has_moved and is_commanding_forward and abs(v) < self._recovery_stuck_vel_threshold \
                             and not corridor_is_too_narrow and self._enable_control:

@@ -128,7 +128,7 @@ class MPC:
         self.max_steering_rate = max_steering_rate
 
 
-    def _init_problem(self, N, umin, umax, safety_margin, dynamic_obstacles=None):
+    def _init_problem(self, N, umin, umax, safety_margin, dynamic_obstacles=None, launch_N=None):
         import time
         t_start = time.time()
         
@@ -173,7 +173,7 @@ class MPC:
         kappa_pred = np.tan(np.append(np.array(self.current_control[3::self.nu]), self.current_control[-1])) / self.model.length
 
         # Consider control delay
-        self.model.wp_id += self.wp_id_offset
+        offset_wp_id = self.model.wp_id + self.wp_id_offset
 
         # Iterate over horizon
         for n in range(N):
@@ -191,11 +191,11 @@ class MPC:
 
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
             ub, lb, _ = self.model.reference_path.update_path_constraints(
-                self.model.wp_id + 1,
+                offset_wp_id + 1,
                 [self.model.temporal_state.x, self.model.temporal_state.y, self.model.temporal_state.psi],
-                N, self.model.length, self.model.width, safety_margin, dynamic_obstacles=dynamic_obstacles)
+                N, self.model.length, self.model.width, safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N)
         else:
-            ref_wp_id = (self.model.wp_id + 1) % len(self.model.reference_path.path_constraints[0])
+            ref_wp_id = (offset_wp_id + 1) % len(self.model.reference_path.path_constraints[0])
             ub = self.model.reference_path.path_constraints[0][ref_wp_id]
             lb = self.model.reference_path.path_constraints[1][ref_wp_id]
             self.model.reference_path.border_cells.current_wp_id = ref_wp_id
@@ -277,7 +277,7 @@ class MPC:
         t_setup_end = time.time()
         return P, q, A_full, l, u
 
-    def get_control(self, dynamic_obstacles=None) -> Tuple[np.ndarray, float]:
+    def get_control(self, dynamic_obstacles=None, launch_N=None) -> Tuple[np.ndarray, float]:
         """
         Get control signal given the current position of the car.
         """
@@ -298,7 +298,7 @@ class MPC:
         t_t2s_end = time.time()
 
         t_init_start = time.time()
-        P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], self.model.safety_margin, dynamic_obstacles=dynamic_obstacles)
+        P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], self.model.safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N)
         t_init_end = time.time()
 
 
@@ -314,7 +314,7 @@ class MPC:
             if not np.all(use_control_signals):
                 for i in range(1, 6):
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
-                    self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], relaxed_safety_margin, dynamic_obstacles=dynamic_obstacles)
+                    self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], relaxed_safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N)
                     dec = self.optimizer.solve()
                     control_signals = np.array(dec.x[-N*nu:])
                     use_control_signals = control_signals[1::2]
