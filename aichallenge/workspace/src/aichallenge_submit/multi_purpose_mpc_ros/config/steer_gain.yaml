@@ -87,7 +87,7 @@ steer_gain_configurator:
     gain: 0.1
     wp_id: 140
   s29:
-    gain: 1.2
+    gain: 0.1
     wp_id: 145
   s30:
     gain: 1.2

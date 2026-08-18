@@ -177,6 +177,7 @@ class ReferencePath:
         :param max_width: maximum width of path to both sides in m
         :param circular: True if path circular
         """
+        self.corridor_bias = []  # List of [start_wp, end_wp, "LEFT"/"RIGHT"]
 
         self.org_wp_x = wp_x
         self.org_wp_y = wp_y
@@ -821,7 +822,7 @@ class ReferencePath:
 
         return np.array(upper_bounds), np.array(lower_bounds)
 
-    def update_path_constraints(self, wp_id, pose, N, model_length, model_width, safety_margin, dynamic_obstacles=None):
+    def update_path_constraints(self, wp_id, pose, N, model_length, model_width, safety_margin, dynamic_obstacles=None, launch_N=None):
         """
         Compute upper and lower bounds of the drivable area orthogonal to
         the given waypoint.
@@ -888,6 +889,14 @@ class ReferencePath:
                         
                         if getattr(obs, 'vid', None) is not None:
                             force_side = obstacle_choices.get(obs.vid)
+                        
+                        # Apply track strategy map (corridor bias) if no side is forced yet
+                        if force_side is None and self.corridor_bias:
+                            curr_wp_id = (wp_id + n) % self.n_waypoints
+                            for bias_start, bias_end, bias_side in self.corridor_bias:
+                                if bias_start <= curr_wp_id <= bias_end:
+                                    force_side = bias_side
+                                    break
 
                         if force_side is not None:
                             if "LEFT" in force_side:
