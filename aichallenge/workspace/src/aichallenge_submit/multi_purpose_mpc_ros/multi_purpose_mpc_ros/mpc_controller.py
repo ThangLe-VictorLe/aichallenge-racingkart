@@ -534,28 +534,23 @@ class MPCController(Node):
             # Proximity gate params (with hysteresis)
             self._v2x_activation_dist = float(v2x_cfg.activation_distance_m)  # type: ignore
             self._v2x_deactivation_dist = float(v2x_cfg.deactivation_distance_m)  # type: ignore
-            self._min_overtaking_steer_gain = float(v2x_cfg.min_overtaking_steer_gain)  # type: ignore
+            self._min_overtaking_steer_gain = 1.2 # Default, updated dynamically
 
             # Tailing & Overtaking Config
             self._v2x_tailing_distance = float(getattr(v2x_cfg, 'tailing_distance_m', 15.0))
-            self._v2x_tailing_speed_gain = float(getattr(v2x_cfg, 'tailing_speed_gain', 0.1))
-            self._v2x_tailing_speed_min_delta = float(getattr(v2x_cfg, 'tailing_speed_min_delta', 0.5))
-            self._v2x_ignore_tailing_vel = float(getattr(v2x_cfg, 'ignore_tailing_vel_kmh', 10.0))
-            self._no_overtake_zones = getattr(v2x_cfg, 'no_overtake_zones', [])
+            
+            # Strict Tailing Config (Real No-Overtake Zones)
+            self._strict_tailing_speed_gain = float(getattr(v2x_cfg, 'strict_tailing_speed_gain', 0.1))
+            self._strict_tailing_min_delta = float(getattr(v2x_cfg, 'strict_tailing_min_delta', 0.5))
+            self._strict_no_overtake_zones = getattr(v2x_cfg, 'strict_no_overtake_zones', [])
+            
             self._corridor_bias = getattr(v2x_cfg, 'corridor_bias', [])
             
-            # Dynamic Launch & N-Step
-            dyn_launch = getattr(v2x_cfg, 'dynamic_launch', None)
-            if dyn_launch is not None:
-                self._v2x_fast_oppo_vel = float(getattr(dyn_launch, 'fast_oppo_vel_kmh', 26.0))
-                self._v2x_fast_oppo_n = float(getattr(dyn_launch, 'fast_oppo_n', 20))
-                self._v2x_slow_oppo_vel = float(getattr(dyn_launch, 'slow_oppo_vel_kmh', 5.0))
-                self._v2x_slow_oppo_n = float(getattr(dyn_launch, 'slow_oppo_n', 50))
-            else:
-                self._v2x_fast_oppo_vel = 26.0
-                self._v2x_fast_oppo_n = 20
-                self._v2x_slow_oppo_vel = 5.0
-                self._v2x_slow_oppo_n = 50
+            self._fast_opponent_cfg = getattr(v2x_cfg, 'fast_opponent', None)
+            self._slow_opponent_cfg = getattr(v2x_cfg, 'slow_opponent', None)
+            
+            # Default fallback if config is missing
+            self._v2x_fast_threshold = float(getattr(self._fast_opponent_cfg, 'threshold_kmh', 18.0)) if self._fast_opponent_cfg else 18.0
             # Runtime state
             self._v2x_avoidance_active = False
             self._is_launch_mode_active = False
@@ -1518,13 +1513,40 @@ class MPCController(Node):
                 opp_speed_mps = np.hypot(opp_vx, opp_vy)
                 opp_speed_kmph = opp_speed_mps * 3.6
                 
-                # Interpolate dynamic N between slow_n and fast_n
-                launch_N_raw = np.interp(
-                    opp_speed_kmph, 
-                    [self._v2x_slow_oppo_vel, self._v2x_fast_oppo_vel], 
-                    [self._v2x_slow_oppo_n, self._v2x_fast_oppo_n]
-                )
-                self._current_launch_N = int(round(launch_N_raw))
+                # Determine if opponent is FAST or SLOW based on threshold
+                is_fast_oppo = (opp_speed_kmph >= self._v2x_fast_threshold)
+                
+                # Select the appropriate config dictionary
+                if is_fast_oppo and self._fast_opponent_cfg is not None:
+                    oppo_cfg = self._fast_opponent_cfg
+                elif not is_fast_oppo and self._slow_opponent_cfg is not None:
+                    oppo_cfg = self._slow_opponent_cfg
+                else:
+                    oppo_cfg = None
+                    
+                # Extract parameters with defaults
+                active_tailing_speed_gain = float(getattr(oppo_cfg, 'tailing_speed_gain', 0.17)) if oppo_cfg else 0.17
+                active_tailing_speed_min_delta = float(getattr(oppo_cfg, 'tailing_speed_min_delta', 1.2)) if oppo_cfg else 1.2
+                active_min_overtaking_steer_gain = float(getattr(oppo_cfg, 'min_overtaking_steer_gain', 1.2)) if oppo_cfg else 1.2
+                self._min_overtaking_steer_gain = active_min_overtaking_steer_gain
+                active_launch_n = int(getattr(oppo_cfg, 'launch_n', 20)) if oppo_cfg else 20
+                active_no_overtake_zones = getattr(oppo_cfg, 'no_overtake_zones', []) if oppo_cfg else []
+                
+                # Check if ego is in the active PREP zone (aggressive tailing, no launching)
+                in_prep_zone = False
+                for zone in active_no_overtake_zones:
+                    if len(zone) >= 2 and zone[0] <= ego_wp_id <= zone[1]:
+                        in_prep_zone = True
+                        break
+                        
+                # Check if ego is in the STRICT NO-OVERTAKE zone (safe tailing, no launching)
+                in_strict_zone = False
+                for zone in self._strict_no_overtake_zones:
+                    if len(zone) >= 2 and zone[0] <= ego_wp_id <= zone[1]:
+                        in_strict_zone = True
+                        break
+
+                self._current_launch_N = active_launch_n
                 
                 # Convert the N-steps into a spatial launch distance
                 dt = 1.0 / self._mpc_cfg.control_rate # 0.025s
@@ -1534,41 +1556,41 @@ class MPCController(Node):
                 hysteresis_dist = dynamic_launch_dist + 4.0 if getattr(self, '_prev_launch_mode_active', False) else dynamic_launch_dist
                 launch_distance_reached = (min_ds <= hysteresis_dist)
                 
-                if in_no_overtake_zone:
-                    # Conservative tailing for distance keeping (hardcoded)
-                    speed_delta = max(0.5, min_ds * 0.1) # m/s
+                if in_strict_zone:
+                    # STRICT Tailing for safe distance keeping
+                    speed_delta = max(self._strict_tailing_min_delta, min_ds * self._strict_tailing_speed_gain) # m/s
                 else:
-                    # Aggressive tailing for gaining up velocity for a pass (config based)
-                    speed_delta = max(self._v2x_tailing_speed_min_delta, min_ds * self._v2x_tailing_speed_gain) # m/s
+                    # PREP / AGGRESSIVE Tailing for gaining up velocity for a pass (config based)
+                    speed_delta = max(active_tailing_speed_min_delta, min_ds * active_tailing_speed_gain) # m/s
                 
                 tail_speed_mps = opp_speed_mps + speed_delta
                 
-                if not in_no_overtake_zone:
+                if not in_prep_zone and not in_strict_zone:
                     if launch_distance_reached:
                         # Launch mode activate!
                         self._is_launch_mode_active = True
                         is_overtaking_active = True
                         # target_v_max_mps remains self._mpc_cfg.v_max
-                        self.get_logger().info(f"[LAUNCH MODE] Launch distance reached ({min_ds:.1f}m)! Full speed & min steer gain: {self._min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
+                        self.get_logger().info(f"[LAUNCH MODE] {'FAST' if is_fast_oppo else 'SLOW'} Oppo! Launch distance reached ({min_ds:.1f}m)! Full speed & min steer gain: {active_min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
                     else:
-                        # Tailing outside no overtake zone
+                        # Tailing outside all zones
                         if min_ds < self._v2x_tailing_distance:
                             target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
-                            self.get_logger().info(f"[TAILING] Opponent '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
-                else: # Inside no overtake zone
+                            self.get_logger().info(f"[TAILING] {'FAST' if is_fast_oppo else 'SLOW'} Oppo '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
+                else: # Inside either prep zone or strict zone
                     # Inside the zone, ONLY trigger emergency pass if opponent is practically crashed.
-                    # Using ignore_tailing_vel (11 km/h) here causes false overtakes because karts naturally slow down in corners!
                     oppo_crashed_inside = (opp_speed_kmph < 5.0)
                     
                     if oppo_crashed_inside:
-                        # Overtake (Emergency Pass) immediately! Do not wait for launch distance because tailing will slow us down to 0 and the dynamic launch distance will shrink to 0!
+                        # Overtake (Emergency Pass) immediately!
                         self._is_launch_mode_active = True
                         is_overtaking_active = True
-                        self.get_logger().info(f"[LAUNCH MODE] No-Overtake Zone Override (wp={ego_wp_id})! Opponent crashed/slow. Executing pass immediately. Min steer gain: {self._min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
+                        self.get_logger().info(f"[LAUNCH MODE] Zone Override (wp={ego_wp_id})! Opponent crashed/slow. Executing pass immediately. Min steer gain: {active_min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
                     elif min_ds < self._v2x_tailing_distance:
-                        # Tailing inside no overtake zone
+                        # Tailing inside a zone
                         target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
-                        self.get_logger().info(f"[TAILING] No-Overtake Zone (wp={ego_wp_id}). Tailing '{nearest_vid}' at {min_ds:.1f}m. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
+                        zone_type = "STRICT ZONE" if in_strict_zone else "PREP ZONE"
+                        self.get_logger().info(f"[TAILING] {zone_type} (wp={ego_wp_id}). Tailing '{nearest_vid}' at {min_ds:.1f}m. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
 
         if getattr(self, '_prev_launch_mode_active', False) and not self._is_launch_mode_active:
             self.get_logger().info("[LAUNCH MODE] Overtaking maneuver finished. Returning to normal steer gain.", throttle_duration_sec=2.0)
