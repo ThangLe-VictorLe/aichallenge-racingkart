@@ -278,9 +278,9 @@ class MPCController(Node):
 
             for param in parameters:
                 if param.name == "v_max" and param.type_ == Parameter.Type.DOUBLE:
-                    mpc_cfg.v_max = param.value
-                    self._mpc.update_v_max(kmh_to_m_per_sec(param.value))
-                    v_ref: List[float] = [kmh_to_m_per_sec(param.value)] * len(self._reference_path.waypoints)
+                    mpc_cfg.v_max = kmh_to_m_per_sec(param.value)
+                    self._mpc.update_v_max(mpc_cfg.v_max)
+                    v_ref: List[float] = [mpc_cfg.v_max] * len(self._reference_path.waypoints)
                     self._reference_path.set_v_ref(v_ref)
 
                     self.get_logger().warn(f"v_max was updated to '{param.value}' [km/h]")
@@ -1485,7 +1485,7 @@ class MPCController(Node):
             target_v_max_mps = min(current_wp.v_ref, self._mpc_cfg.v_max)
         else:
             if self._ref_vel_configulator is not None:
-                ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
+                ref_vel_mps = kmh_to_m_per_sec(self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id))
                 target_v_max_mps = min(ref_vel_mps, self._mpc_cfg.v_max)
                 v_ref: List[float] = [target_v_max_mps] * len(self._reference_path.waypoints)
                 self._reference_path.set_v_ref(v_ref)
@@ -1579,7 +1579,7 @@ class MPCController(Node):
                             self.get_logger().info(f"[TAILING] {'FAST' if is_fast_oppo else 'SLOW'} Oppo '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
                 else: # Inside either prep zone or strict zone
                     # Inside the zone, ONLY trigger emergency pass if opponent is practically crashed.
-                    oppo_crashed_inside = (opp_speed_kmph < 5.0)
+                    oppo_crashed_inside = (opp_speed_kmph < 3.5)
                     
                     if oppo_crashed_inside:
                         # Overtake (Emergency Pass) immediately!
