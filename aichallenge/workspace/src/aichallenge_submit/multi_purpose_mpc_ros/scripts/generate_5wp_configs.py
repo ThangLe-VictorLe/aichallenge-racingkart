@@ -229,7 +229,7 @@ def generate_default_configs(config_dir: str, step: int = 5, max_wp: int = None)
             print(f"[WARN] Could not compute max_wp from CSV ({e}), falling back to {max_wp}")
     # Default ref_vel map
     def get_default_vel(wp_id):
-        return 36.0
+        return 29.0
 
     # Default steer_gain map
     def get_default_gain(wp_id):
