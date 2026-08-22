@@ -628,15 +628,41 @@ class MPCController(Node):
 
         self._recovery_state = "NORMAL"
         self._stuck_start_time = None
+        self._node_start_time = None
         self._recovering_start_time = None
         self._cooldown_start_time = None
         # Only allow stuck detection after the kart has moved at least once
-        # (prevents false trigger at race start when v=0 but MPC commands speed)
         self._has_moved = False
 
         # save config
         if self._cfg.common.save_config:
             self._save_config()
+
+    @staticmethod
+    def _interpolate_gain(gain_config, current_v_kmh, default_gain=1.2):
+        if isinstance(gain_config, list) and len(gain_config) > 0:
+            try:
+                # Expecting [[speed1, gain1], [speed2, gain2], ...]
+                pts = sorted(gain_config, key=lambda x: x[0])
+                if current_v_kmh <= pts[0][0]:
+                    return float(pts[0][1])
+                if current_v_kmh >= pts[-1][0]:
+                    return float(pts[-1][1])
+                # Interpolate
+                for i in range(len(pts) - 1):
+                    if pts[i][0] <= current_v_kmh <= pts[i+1][0]:
+                        v1, g1 = float(pts[i][0]), float(pts[i][1])
+                        v2, g2 = float(pts[i+1][0]), float(pts[i+1][1])
+                        ratio = (current_v_kmh - v1) / (v2 - v1) if v2 > v1 else 0.0
+                        return float(g1 + ratio * (g2 - g1))
+            except Exception:
+                pass
+            return default_gain
+        else:
+            try:
+                return float(gain_config)
+            except (TypeError, ValueError):
+                return default_gain
 
     def _save_config(self) -> None:
         now = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1333,6 +1359,10 @@ class MPCController(Node):
     def _control(self):
         now = self.get_clock().now()
         t = (now - self._t_start).nanoseconds / 1e9
+        now_sec = now.nanoseconds / 1e9
+        
+        if self._node_start_time is None:
+            self._node_start_time = now_sec
         dt = (now - self._last_t).nanoseconds / 1e9
 
         self._last_t = now
@@ -1527,7 +1557,9 @@ class MPCController(Node):
                 # Extract parameters with defaults
                 active_tailing_speed_gain = float(getattr(oppo_cfg, 'tailing_speed_gain', 0.17)) if oppo_cfg else 0.17
                 active_tailing_speed_min_delta = float(getattr(oppo_cfg, 'tailing_speed_min_delta', 1.2)) if oppo_cfg else 1.2
-                active_min_overtaking_steer_gain = float(getattr(oppo_cfg, 'min_overtaking_steer_gain', 1.2)) if oppo_cfg else 1.2
+                raw_gain_cfg = getattr(oppo_cfg, 'min_overtaking_steer_gain', 1.2) if oppo_cfg else 1.2
+                current_v_kmh = abs(v) * 3.6
+                active_min_overtaking_steer_gain = self._interpolate_gain(raw_gain_cfg, current_v_kmh, default_gain=1.2)
                 self._min_overtaking_steer_gain = active_min_overtaking_steer_gain
                 active_launch_n = int(getattr(oppo_cfg, 'launch_n', 20)) if oppo_cfg else 20
                 active_no_overtake_zones = getattr(oppo_cfg, 'no_overtake_zones', []) if oppo_cfg else []
@@ -1757,20 +1789,24 @@ class MPCController(Node):
                     # Only trigger after kart has actually moved at least once.
                     # Suppress when V2X is active (intentional stop for overtaking),
                     # corridor is too narrow (kart waiting for gap), or control is disabled (manual).
-                    v2x_suppressed = self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active
-                    
                     # When MPC crashes (infeasibility), it uses leftover predictions for up to 1.25s (50 frames).
                     # During this playback, the planned velocity might dip, which would reset the stuck timer!
                     # If the solver is failing (infeasibility_counter > 0), we must keep the stuck timer running.
                     # We use target_v_max_mps (intent) rather than u[0] (output) because if stuck against a wall, MPC might brake (u[0]=0).
                     is_commanding_forward = (target_v_max_mps > 1.0 or self._mpc.infeasibility_counter > 0)
 
-                    if self._has_moved and is_commanding_forward and abs(v) < self._recovery_stuck_vel_threshold \
-                            and not corridor_is_too_narrow and self._enable_control:
+                    # Dynamic stuck time: if we are trying to go fast and are stopped, trigger quickly (0.4s).
+                    # If we intentionally stopped (tailing a stopped opponent), give it a longer grace period (1.5s)
+                    # before deciding we are trapped and need to reverse out.
+                    active_stuck_time_sec = self._recovery_stuck_time_sec if is_commanding_forward else 1.5
+
+                    if self._has_moved and abs(v) < self._recovery_stuck_vel_threshold \
+                            and not corridor_is_too_narrow and self._enable_control \
+                            and (now_sec - self._node_start_time) >= 8.0:
                         if self._stuck_start_time is None:
                             self._stuck_start_time = now_sec
                             self.get_logger().warn("Stuck timer started...", throttle_duration_sec=1.0)
-                        elif (now_sec - self._stuck_start_time) >= self._recovery_stuck_time_sec:
+                        elif (now_sec - self._stuck_start_time) >= active_stuck_time_sec:
                             self.get_logger().warn(f"Stuck detected at wp {curr_wp_id}! Switching to REVERSE gear, recovering for {self._recovery_reverse_time_sec}s...")
                             self._recovery_state = "RECOVERING"
                             self._set_Q0(self._recovery_cooldown_Q0)
