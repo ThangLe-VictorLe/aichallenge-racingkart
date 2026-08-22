@@ -640,6 +640,12 @@ class MPCController(Node):
         # effective (possibly elevated) gain for the current/next cooldown phase.
         self._recovery_cycle_count = 0
         self._current_post_recovery_steer_gain = self._post_recovery_steer_gain
+        self._post_recovery_overtake_pending = False
+        self._overtaking_cycle_count = 0
+        self._overtaking_steer_gain = 1.2
+        self._overtaking_gain_increment = 0.5
+        self._overtaking_gain_max = 3.0
+        self._current_overtaking_steer_gain = 1.2
         # Only allow stuck detection after the kart has moved at least once
         self._has_moved = False
 

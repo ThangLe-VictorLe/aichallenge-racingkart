@@ -135,7 +135,7 @@ v2x_obstacle_avoidance:
     threshold_kmh: 20.0            # Opponent speeds above this use these settings
     tailing_speed_gain: 0.2       # [-] proportional gain for approach speed
     tailing_speed_min_delta: 1.4   # [m/s] minimum relative speed during tailing
-    min_overtaking_steer_gain: [[20.0, 1.0], [35.0, 0.8]] # [-] dynamic min steer gain based on current speed
+    min_overtaking_steer_gain: [[20.0, 1.3], [35.0, 0.8]] # [-] dynamic min steer gain based on current speed
     launch_n: 30                   # For sonner vel boost, Dictates the Launch Distance (small N = wait until very close to launch)
     no_overtake_zones: [[150.0, 160.0],[190.0,200.0]] # Block straights here to prevent overtaking fast opponents on straights!
 
