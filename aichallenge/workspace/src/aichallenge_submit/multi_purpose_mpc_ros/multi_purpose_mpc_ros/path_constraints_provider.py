@@ -213,6 +213,9 @@ class PathConstraintsProvider(Node):
         self._map = create_map()
         self._reference_path = create_ref_path(self._map)
         self._obstacles = create_obstacles()
+        if self._obstacles:
+            self._map.add_obstacles(self._obstacles)
+        self._map.save_static_map()
         self._car = create_car(self._reference_path)
         self._mpc_cfg, self._mpc = create_mpc(self._car)
         compute_speed_profile(self._car, self._mpc_cfg)
@@ -247,7 +250,8 @@ class PathConstraintsProvider(Node):
                 if self._obstacles_updated:
                     self._obstacles_updated = False
                     self._map.reset_map()
-                    self._map.add_obstacles(self._obstacles)
+                    if self._obstacles:
+                        self._map.add_obstacles(self._obstacles)
                     self._reference_path.reset_dynamic_constraints()
 
                 ub_hor, lb_hor, border_cells_hor_sm = self._car.reference_path.update_path_constraints(

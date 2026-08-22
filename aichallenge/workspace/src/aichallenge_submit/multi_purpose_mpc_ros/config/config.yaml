@@ -36,12 +36,12 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.5   # artificially squeezed to force strict tracking
+  width: 1.55   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: false
-  use_dynamic_steer_gain: false
-  N: 20
+  use_dynamic_steer_gain: true
+  N: 18
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
@@ -64,9 +64,9 @@ mpc:
   ## ---------- 究極 ------------- ##
   ## Lap1: 53s, Lap2: 47s
 
-  v_max: 50.0   # km/h
+  v_max: 35.0   # km/h
   ay_max: 22.0 # m/s^2, maximum lateral acceleration in curves
-  Q: [600000.0, 80000000.0, 2000000.0]
+  Q: [500000.0, 80000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##
@@ -109,7 +109,7 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 1.3           # [m] clearance radius around opponent kart
+  vehicle_radius: 0.55           # [m] clearance radius around opponent kart
   v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
   position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
 
@@ -119,35 +119,50 @@ v2x_obstacle_avoidance:
   # Hysteresis: activate at activation_distance_m, deactivate at deactivation_distance_m.
   # Set activation_distance_m: 0.0 to fully disable, or a large value to always activate.
   activation_distance_m: 20.0   # [m] turn ON avoidance when opponent closer than this
-  deactivation_distance_m: 22.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
+  deactivation_distance_m: 25.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
 
-  # --- Accumulated Overtaking Steer Gain ---
-  # Fixed steer gain applied while overtaking is active (overrides per-waypoint gain from steer_gain.yaml).
-  # Tune this to get smooth steering response during the overtake maneuver.
-  overtaking_steer_gain: 1.5    # [-] steer gain multiplier during active overtake
-  # Each time the kart goes through a recovery cycle and then enters overtaking mode,
-  # the effective overtaking_steer_gain is increased by this increment.
-  # Cycle: crash → recovery → (cooldown) → overtaking activation → gain bumped
-  overtaking_steer_gain_increment: 0.5  # [-] gain added per post-recovery overtaking activation
-  overtaking_steer_gain_max: 3.0        # [-] cap to prevent runaway gain
+  # --- Tailing & Overtaking Strategy ---
+  tailing_distance_m: 12.0      # [m] distance to start matching opponent's speed
+
+  # --- Strict Tailing (Safe Distance Keeping) ---
+  # These parameters are used globally when inside a strict_no_overtake_zone.
+  # The kart will NOT try to creep up and attack.
+  strict_tailing_speed_gain: 0.1
+  strict_tailing_min_delta: 0.5 
+  strict_no_overtake_zones: [[285.0, 335.0]] # Real tailing zones (example)
+
+  fast_opponent:
+    threshold_kmh: 20.0            # Opponent speeds above this use these settings
+    tailing_speed_gain: 0.2       # [-] proportional gain for approach speed
+    tailing_speed_min_delta: 1.4   # [m/s] minimum relative speed during tailing
+    min_overtaking_steer_gain: [[20.0, 1.0], [35.0, 0.8]] # [-] dynamic min steer gain based on current speed
+    launch_n: 30                   # For sonner vel boost, Dictates the Launch Distance (small N = wait until very close to launch)
+    no_overtake_zones: [[150.0, 160.0],[190.0,200.0]] # Block straights here to prevent overtaking fast opponents on straights!
+
+  slow_opponent:
+    tailing_speed_gain: 0.34        
+    tailing_speed_min_delta: 2.3
+    min_overtaking_steer_gain: [[10.0, 1.75], [25.0, 1.0]] # Dynamic gain: 1.8 at slow speeds, decaying to 1.0 at high speeds
+    launch_n: 40                   # For sooner lane change, Dictates the Launch Distance (large N = launch earlier from further away)
+    no_overtake_zones: [[150.0, 160.0]] # Fewer zones, slow cars are safe to pass anywhere else
+
+  # --- Track Strategy Map (Pacenotes) ---
+  # List of waypoint intervals [start_wp, end_wp, "LEFT" or "RIGHT"] to force a specific passing side.
+  # Use this to prevent getting pinched against the wall in tricky corners where the opponent naturally drifts.
+  # corridor_bias: [[225.0, 240.0, "LEFT"], [300.0, 310.0, "RIGHT"]]
+  corridor_bias: [[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[250.0, 270.0,"LEFT"]]
 
 recovery:
   enable: true
-  stuck_vel_threshold_kmh: 0.3   # [km/h] threshold to consider vehicle stuck
-  stuck_time_sec: 1.0            # [s] seconds stuck before triggering recovery
+  stuck_vel_threshold_kmh: 0.2   # [km/h] threshold to consider vehicle stuck
+  stuck_time_sec: 0.5            # [s] seconds stuck before triggering recovery
   reverse_vel_kmh: -5.0          # [km/h] speed when reversing out
-  reverse_time_sec: 4.0          # [s] duration to reverse
+  reverse_time_sec: 3.0          # [s] duration to reverse
   recovery_steer_gain: 2.0       # fixed steer gain override during recovery
   post_recovery_steer_gain: 2.0  # fixed steer gain override AFTER recovery (during cooldown)
-  cooldown_sec: 6.0              # [s] cooldown duration after recovery finishes
-  disabled_waypoints: [45, 50]   # disable recovery at race start (waypoints 45 to 50)
-
-  # --- Accumulated Steer Gain ---
-  # Each time a full stuck cycle (NORMAL→RECOVERING→COOLDOWN→NORMAL) completes,
-  # the effective post_recovery_steer_gain is increased by this increment.
-  # This helps the kart escape repeated stuck situations by steering harder each attempt.
-  post_recovery_steer_gain_increment: 0.5   # [-] gain added per recovery cycle
-  post_recovery_steer_gain_max: 4.0         # [-] cap to prevent runaway gain
+  cooldown_sec: 2.0              # [s] cooldown duration after recovery finishes
+  cooldown_Q0: 0.01        # Q[0] override during cooldown
+  disabled_waypoints: []         # disable recovery at race start (waypoints 45 to 50)
 
 # =============================================================================
 # Debug Visualization
@@ -175,5 +190,3 @@ debug_visualization:
   path_corridor:      true   # RViz2: drivable corridor bounds ahead of kart
   dynamic_obstacles:  true   # RViz2: V2X opponent obstacle blobs (orange cylinders)
   v2x_status_text:    true   # RViz2: floating text showing V2X gate state
-
-

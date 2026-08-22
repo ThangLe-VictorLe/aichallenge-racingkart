@@ -376,7 +376,7 @@ def main():
             pass
 
     if not csv_path or not os.path.exists(csv_path):
-        csv_path = os.path.join(pkg_dir, "env", "final_ver3", "traj_mincurv.csv")
+        csv_path = os.path.join(pkg_dir, "env", "preliminary", "optimized_traj_mincurv.csv")
 
     if not os.path.exists(csv_path):
         print(f"[ERROR] CSV not found: {csv_path}")

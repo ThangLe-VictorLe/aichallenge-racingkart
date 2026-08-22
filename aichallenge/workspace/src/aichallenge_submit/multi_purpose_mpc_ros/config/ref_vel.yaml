@@ -1,31 +1,208 @@
 ref_vel_configulator:
+  s0:
+    ref_vel: 36.0
+    wp_id: 0
   s1:
-    ref_vel: 30.0
-    wp_id: 1
-  s1_1:
-    ref_vel: 30.0
-    wp_id: 30
+    ref_vel: 36.0
+    wp_id: 5
   s2:
-    ref_vel: 30.0
-    wp_id: 55
+    ref_vel: 36.0
+    wp_id: 10
   s3:
-    ref_vel: 30.0
-    wp_id: 100
+    ref_vel: 36.0
+    wp_id: 15
   s4:
-    ref_vel: 30.0
-    wp_id: 155
+    ref_vel: 36.0
+    wp_id: 20
   s5:
-    ref_vel: 30.0
-    wp_id: 190
+    ref_vel: 36.0
+    wp_id: 25
   s6:
-    ref_vel: 30.0
-    wp_id: 265
+    ref_vel: 36.0
+    wp_id: 30
   s7:
-    ref_vel: 30.0
-    wp_id: 290
+    ref_vel: 36.0
+    wp_id: 35
   s8:
-    ref_vel: 30.0
-    wp_id: 320
+    ref_vel: 36.0
+    wp_id: 40
   s9:
-    ref_vel: 30.0
+    ref_vel: 36.0
+    wp_id: 45
+  s10:
+    ref_vel: 36.0
+    wp_id: 50
+  s11:
+    ref_vel: 36.0
+    wp_id: 55
+  s12:
+    ref_vel: 36.0
+    wp_id: 60
+  s13:
+    ref_vel: 36.0
+    wp_id: 65
+  s14:
+    ref_vel: 36.0
+    wp_id: 70
+  s15:
+    ref_vel: 36.0
+    wp_id: 75
+  s16:
+    ref_vel: 36.0
+    wp_id: 80
+  s17:
+    ref_vel: 36.0
+    wp_id: 85
+  s18:
+    ref_vel: 36.0
+    wp_id: 90
+  s19:
+    ref_vel: 36.0
+    wp_id: 95
+  s20:
+    ref_vel: 36.0
+    wp_id: 100
+  s21:
+    ref_vel: 36.0
+    wp_id: 105
+  s22:
+    ref_vel: 36.0
+    wp_id: 110
+  s23:
+    ref_vel: 36.0
+    wp_id: 115
+  s24:
+    ref_vel: 36.0
+    wp_id: 120
+  s25:
+    ref_vel: 36.0
+    wp_id: 125
+  s26:
+    ref_vel: 36.0
+    wp_id: 130
+  s27:
+    ref_vel: 36.0
+    wp_id: 135
+  s28:
+    ref_vel: 36.0
+    wp_id: 140
+  s29:
+    ref_vel: 36.0
+    wp_id: 145
+  s30:
+    ref_vel: 29.0
+    wp_id: 150
+  s31:
+    ref_vel: 29.0
+    wp_id: 155
+  s32:
+    ref_vel: 29.0
+    wp_id: 160
+  s33:
+    ref_vel: 29.0
+    wp_id: 165
+  s34:
+    ref_vel: 29.0
+    wp_id: 170
+  s35:
+    ref_vel: 29.0
+    wp_id: 175
+  s36:
+    ref_vel: 29.0
+    wp_id: 180
+  s37:
+    ref_vel: 29.0
+    wp_id: 185
+  s38:
+    ref_vel: 29.0
+    wp_id: 190
+  s39:
+    ref_vel: 29.0
+    wp_id: 195
+  s40:
+    ref_vel: 29.0
+    wp_id: 200
+  s41:
+    ref_vel: 29.0
+    wp_id: 205
+  s42:
+    ref_vel: 29.0
+    wp_id: 210
+  s43:
+    ref_vel: 29.0
+    wp_id: 215
+  s44:
+    ref_vel: 29.0
+    wp_id: 220
+  s45:
+    ref_vel: 29.0
+    wp_id: 225
+  s46:
+    ref_vel: 29.0
+    wp_id: 230
+  s47:
+    ref_vel: 29.0
+    wp_id: 235
+  s48:
+    ref_vel: 29.0
+    wp_id: 240
+  s49:
+    ref_vel: 29.0
+    wp_id: 245
+  s50:
+    ref_vel: 29.0
+    wp_id: 250
+  s51:
+    ref_vel: 29.0
+    wp_id: 255
+  s52:
+    ref_vel: 29.0
+    wp_id: 260
+  s53:
+    ref_vel: 29.0
+    wp_id: 265
+  s54:
+    ref_vel: 29.0
+    wp_id: 270
+  s55:
+    ref_vel: 29.0
+    wp_id: 275
+  s56:
+    ref_vel: 29.0
+    wp_id: 280
+  s57:
+    ref_vel: 29.0
+    wp_id: 285
+  s58:
+    ref_vel: 29.0
+    wp_id: 290
+  s59:
+    ref_vel: 29.0
+    wp_id: 295
+  s60:
+    ref_vel: 29.0
+    wp_id: 300
+  s61:
+    ref_vel: 29.0
+    wp_id: 305
+  s62:
+    ref_vel: 29.0
+    wp_id: 310
+  s63:
+    ref_vel: 29.0
+    wp_id: 315
+  s64:
+    ref_vel: 29.0
+    wp_id: 320
+  s65:
+    ref_vel: 29.0
+    wp_id: 325
+  s66:
+    ref_vel: 29.0
+    wp_id: 330
+  s67:
+    ref_vel: 29.0
     wp_id: 335
+  s68:
+    ref_vel: 29.0
+    wp_id: 340

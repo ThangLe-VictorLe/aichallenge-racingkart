@@ -4,7 +4,7 @@ import numpy.ma as ma
 import math
 import copy
 from multi_purpose_mpc_ros.core.map import Map, Obstacle
-from skimage.draw import line_aa
+from skimage.draw import line
 import matplotlib.pyplot as plt
 from scipy import sparse
 import osqp
@@ -91,7 +91,7 @@ def calculate_intersection(p1, p2, p3, p4):
 def has_collision_in_line(map, p0, p1):
     p0m = map.w2m(p0[0], p0[1])
     p1m = map.w2m(p1[0], p1[1])
-    x_list, y_list, _ = line_aa(p0m[0], p0m[1], p1m[0], p1m[1])
+    x_list, y_list = line(int(p0m[0]), int(p0m[1]), int(p1m[0]), int(p1m[1]))
 
     occupied_indices = map.data[y_list, x_list] == 0
     if np.any(occupied_indices):
@@ -119,6 +119,7 @@ class Waypoint:
         self.y = y
         self.psi = psi
         self.kappa = kappa
+        self.s = 0.0
 
         # Reference velocity at this waypoint according to speed profile
         self.v_ref = None
@@ -176,6 +177,7 @@ class ReferencePath:
         :param max_width: maximum width of path to both sides in m
         :param circular: True if path circular
         """
+        self.corridor_bias = []  # List of [start_wp, end_wp, "LEFT"/"RIGHT"]
 
         self.org_wp_x = wp_x
         self.org_wp_y = wp_y
@@ -204,6 +206,13 @@ class ReferencePath:
 
         # Length of path
         self.length, self.segment_lengths = self._compute_length()
+        
+        # Populate Frenet s for each waypoint
+        current_s = 0.0
+        for i, wp in enumerate(self.waypoints):
+            wp.s = current_s
+            if i < len(self.segment_lengths) - 1:
+                current_s += self.segment_lengths[i+1]
 
         # Compute path width (attribute of each waypoint)
         self._compute_width(max_width=max_width)
@@ -362,99 +371,83 @@ class ReferencePath:
     def _compute_width(self, max_width):
         """
         Compute the width of the path by checking the maximum free space to
-        the left and right of the center-line.
-        :param max_width: maximum width of the path.
+        the left and right of the center-line using Full Matrix Vectorization.
         """
+        num_wps = len(self.waypoints)
+        if num_wps == 0:
+            return
 
-        # Iterate over all waypoints
-        for wp_id, wp in enumerate(self.waypoints):
-            left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
-                             2 * math.pi) - math.pi
-            right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
-                               2 * math.pi) - math.pi
+        wp_x = np.array([wp.x for wp in self.waypoints])
+        wp_y = np.array([wp.y for wp in self.waypoints])
+        wp_psi = np.array([wp.psi for wp in self.waypoints])
 
-            # Get pixel coordinates of waypoint
-            wp_x, wp_y = self.map.w2m(wp.x, wp.y)
+        # Oversample the ray steps to guarantee we hit every pixel (sub-pixel sampling)
+        ray_steps = int(max_width / self.map.resolution) * 2
+        t = np.linspace(0, 1, ray_steps)
 
-            # List containing information for current waypoint
-            width_info = [] # [0]: left min_width, [1]: left border_cell, [2]: right_width, [3]: right border_cell
-            wp_x_w, wp_y_w = self.map.m2w(wp_x, wp_y)
-            # Check width left and right of the center-line
-            for i, dir in enumerate(['left', 'right']):
-                # Get angle orthogonal to path in current direction
-                angle = left_angle if dir == 'left' else right_angle
+        # Pre-fetch map data and parameters
+        map_data = self.map.data
+        map_width = self.map.width
+        map_height = self.map.height
+        res = self.map.resolution
+        ox = self.map.origin[0]
+        oy = self.map.origin[1]
 
-                # Get border cell to orthogonal vector in map coordinates
-                t_x, t_y = self.map.w2m(wp_x_w + max_width * np.cos(angle), wp_y_w
-                                        + max_width * np.sin(angle))
-                # Compute distance to orthogonal cell on path border
-                b_value, b_cell = self._get_min_width(wp_x_w, wp_y_w, wp_x, wp_y, t_x, t_y, max_width)
+        for dir in ['left', 'right']:
+            if dir == 'left':
+                angle = wp_psi + math.pi / 2
+            else:
+                angle = wp_psi - math.pi / 2
 
-                # Add information to list for current waypoint
-                width_info.append(b_value)
-                width_info.append(b_cell)
+            dir_x = np.cos(angle)
+            dir_y = np.sin(angle)
 
-            # Set waypoint attributes with width to the left and right
-            wp.ub = width_info[0]
-            wp.lb = -1 * width_info[2]  # minus can be assumed as waypoints
-            # represent center-line of the path
-            # Set border cells of waypoint
-            wp.static_border_cells = (width_info[1], width_info[3])   # (left_border_cell(x,y), right_border_cell(x,y))
+            # Target world coordinates
+            target_x = wp_x + max_width * dir_x
+            target_y = wp_y + max_width * dir_y
+
+            # Matrix broadcast: ray_x shape is (num_wps, ray_steps)
+            ray_x = wp_x[:, None] + (target_x - wp_x)[:, None] * t[None, :]
+            ray_y = wp_y[:, None] + (target_y - wp_y)[:, None] * t[None, :]
+
+            # Convert world to map coordinates (vectorized)
+            ray_mx = np.clip(np.round((ray_x - ox) / res), 0, map_width - 1).astype(int)
+            ray_my = np.clip(np.round((map_height - 1) - (ray_y - oy) / res), 0, map_height - 1).astype(int)
+
+            # Map lookup (vectorized)
+            vals = map_data[ray_my, ray_mx]
+
+            # Find first obstacle (0 means obstacle)
+            hit_mask = (vals == 0)
+            hit_idx = np.argmax(hit_mask, axis=1)
+
+            # If no obstacle was hit, set index to the last step (max_width)
+            no_hit = ~np.any(hit_mask, axis=1)
+            hit_idx[no_hit] = ray_steps - 1
+
+            # Extract the hit pixel coordinates
+            hit_mx = ray_mx[np.arange(num_wps), hit_idx]
+            hit_my = ray_my[np.arange(num_wps), hit_idx]
+
+            # Convert hit pixels back to world coordinates
+            hit_wx = hit_mx * res + ox
+            hit_wy = (map_height - 1 - hit_my) * res + oy
+
+            # Compute Euclidean distance
+            dists = np.hypot(hit_wx - wp_x, hit_wy - wp_y)
+
+            # Assign to waypoints
+            for i, wp in enumerate(self.waypoints):
+                if dir == 'left':
+                    wp.ub = dists[i]
+                    left_cell = (hit_wx[i], hit_wy[i])
+                    wp._temp_left_cell = left_cell
+                else:
+                    wp.lb = -1 * dists[i]
+                    right_cell = (hit_wx[i], hit_wy[i])
+                    wp.static_border_cells = (wp._temp_left_cell, right_cell)
 
         self.reset_dynamic_constraints()
-
-    def _get_min_width(self, wp_x_w, wp_y_w, wp_x, wp_y, t_x, t_y, max_width):
-        """
-        Compute the minimum distance between the current waypoint and the
-        orthogonal cell on the border of the path
-        :param wp_x_w: x coordinate of the reference cell in world coordinates
-        :param wp_y_w: y coordinate of the reference cell in world coordinates
-        :param wp_x: x coordinate of the reference cell in map coordinates
-        :param wp_y: y coordinate of the reference cell in map coordinates
-        :param t_x: x coordinate of border cell in map coordinates
-        :param t_y: y coordinate of border cell in map coordinates
-        :param max_width: maximum path width in m
-        :return: min_width to border and corresponding cell
-        """
-
-        min_width = max_width
-        path_x = np.array([])
-        path_y = np.array([])
-
-        # Search around the target cell for obstacles
-        for i in range(-1, 2):
-            for j in range(-1, 2):
-                # Clip the coordinates to stay within map boundaries
-                t_xi = np.clip(t_x + i, 0, self.map.width - 1)
-                t_yj = np.clip(t_y + j, 0, self.map.height - 1)
-
-                # Get the line from the waypoint to the target cell
-                x_list, y_list, _ = line_aa(wp_x, wp_y, t_xi, t_yj)
-                # Check for occupied cells (obstacles)
-                occupied_indices = self.map.data[y_list, x_list] == 0
-
-                if np.any(occupied_indices):
-                    # If there are obstacles, find the nearest one
-                    obstacle_index = np.argmax(occupied_indices)
-                    obstacle_x = x_list[obstacle_index]
-                    obstacle_y = y_list[obstacle_index]
-                    min_cell = self.map.m2w(obstacle_x, obstacle_y)
-                    min_width = np.hypot(wp_x_w - min_cell[0], wp_y_w - min_cell[1])
-                    return min_width, min_cell
-                else:
-                    # If no obstacles are found, add free space coordinates
-                    x_list = ma.masked_array(x_list, mask=occupied_indices).compressed()
-                    y_list = ma.masked_array(y_list, mask=occupied_indices).compressed()
-                    path_x = np.append(path_x, x_list)
-                    path_y = np.append(path_y, y_list)
-
-        # If no obstacles are detected, calculate the distance to the farthest free cell
-        if path_x.size > 0 and path_y.size > 0:
-            min_index = np.argmin(np.hypot(path_x - t_x, path_y - t_y))
-            min_cell = self.map.m2w(path_x[min_index], path_y[min_index])
-            min_width = np.hypot(wp_x_w - min_cell[0], wp_y_w - min_cell[1])
-
-        return min_width, min_cell
 
     def compute_speed_profile(self, Constraints):
         """
@@ -686,7 +679,7 @@ class ReferencePath:
                             wp.static_border_cells[1][1])
 
         # Compute path from left border cell to right border cell
-        x_list, y_list, _ = line_aa(ub_p[0], ub_p[1], lb_p[0], lb_p[1])
+        x_list, y_list = line(ub_p[0], ub_p[1], lb_p[0], lb_p[1])
 
         # Initialize upper and lower bound of drivable area to
         # upper bound of path
@@ -813,18 +806,14 @@ class ReferencePath:
 
         return np.array(upper_bounds), np.array(lower_bounds)
 
-    def update_path_constraints(self, wp_id, pose, N, model_length, model_width, safety_margin):
+    def update_path_constraints(self, wp_id, pose, N, model_length, model_width, safety_margin, dynamic_obstacles=None, launch_N=None):
         """
         Compute upper and lower bounds of the drivable area orthogonal to
         the given waypoint.
         """
-
-        # min_width = model_width / np.sqrt(2)
-        # min_width = model_width
-        # min_width = 2.0 * safety_margin
-        min_width = model_width
-        # min_segment_length = model_width / 4.0
         min_segment_length = 0.1
+        has_printed_corridor_choice = False
+        obstacle_choices = {} # mapping vid to chosen_side
 
         # container for constraints and border cells
         ub_hor = []
@@ -832,71 +821,148 @@ class ReferencePath:
         border_cells_hor = []
         border_cells_hor_sm = []
 
-        def compute_bound(wp, ls):
-            # Check sign of bound
-            angle = np.mod(np.arctan2(ls[1] - wp.y, ls[0] - wp.x)
-                                  - wp.psi + math.pi, 2 * math.pi) - math.pi
-            sign = np.sign(angle)
+        C_prev = 0.0
 
-            # Compute bound
-            bound = sign * np.sqrt(
-                    (ls[0] - wp.x) ** 2 + (ls[1] - wp.y) ** 2)
+        for n in range(N):
+            wp = self.get_waypoint(wp_id + n)
+            
+            # Static bounds minus safety margin
+            ub_sm = wp.ub - safety_margin
+            lb_sm = wp.lb + safety_margin
 
-            return bound
-
-        def add_constraint(wp, ub_ls, lb_ls):
-            # Compute upper and lower bound of largest drivable area
-            ub = compute_bound(wp, ub_ls)
-            lb = compute_bound(wp, lb_ls)
-
-            segment_length = ub - lb
-            segment_length_sm = segment_length - 2.0 * safety_margin
-
-            # Check feasibility of the path
-            # segment_lengthから両側のsafety_marginを引いた値がmin_segment_lengthより小さい場合は、
-            # border_cellsで囲まれる領域の隙間が狭すぎて障害物回避が困難なため、
-            # 回避を諦めてwaypointのstaticなupper boundとlower boundを代わりに使用する
-            if segment_length_sm < min_segment_length:
-                # print("Infeasible path detected!")
-                # print(f"Waypoint: {wp_id}, n: {n}, Upper bound: {ub}")
-                # print(f"min_width: {min_width}, safety_margin: {safety_margin}, segment_length: {segment_length}, segment_length_sm: {segment_length_sm}")
-                (ub, lb) = (wp.ub, wp.lb)
-                # print(f"Updated Upper bound: {wp.ub}, Updated Lower bound: {wp.lb}")
-
-            # Subtract safety margin
-            ub_sm = ub - safety_margin
-            lb_sm = lb + safety_margin
-
-            if wp.ub_sm < ub_sm:
-              ub_sm = wp.ub_sm
-            if wp.lb_sm > lb_sm:
-              lb_sm = wp.lb_sm
-
-            # Check feasibility of the path after subtracting safety margin
             if ub_sm < lb_sm:
-                # 一つ前のifの判定でboundsは正常になっているはずなので、こちらの判定に入る場合は何らかの実装上の異常がある
-                print("!!!! Infeasible path detected !!!!")
                 ub_sm = 0.0
                 lb_sm = 0.0
 
-            # Compute absolute angle of bound cell
-            angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi,
-                                  2 * math.pi) - math.pi
-            angle_lb = np.mod(-math.pi / 2 + wp.psi + math.pi,
-                                  2 * math.pi) - math.pi
-            # Compute cell on bound for computed distance ub_sm and lb_sm
-            ub_sm_ls = wp.x + ub_sm * np.cos(angle_ub), wp.y + ub_sm * np.sin(
-                    angle_ub)
-            lb_sm_ls = wp.x - lb_sm * np.cos(angle_lb), wp.y - lb_sm * np.sin(
-                    angle_lb)
-            bound_cells_sm = (ub_sm_ls, lb_sm_ls)
-            self.select_free_segs.append([ub_sm_ls, lb_sm_ls])
+            if dynamic_obstacles is not None:
+                for obs in dynamic_obstacles:
+                    dx = obs.cx - wp.x
+                    dy = obs.cy - wp.y
+                    
+                    # Project obstacle center onto path coordinate frame
+                    s_dist_proj = dx * np.cos(wp.psi) + dy * np.sin(wp.psi)
+                    d_dist = -dx * np.sin(wp.psi) + dy * np.cos(wp.psi)
+                    
+                    # Effective radius including safety margin
+                    R_eff = obs.radius + safety_margin
+                    
+                    # Calculate true along-track distance to prevent ghost obstacles on sharp curves
+                    if hasattr(wp, 's') and hasattr(obs, 's') and obs.s is not None:
+                        s_dist = wp.s - obs.s
+                        # Handle circular track wrap-around
+                        if self.circular:
+                            s_dist = (s_dist + self.length / 2) % self.length - self.length / 2
+                    else:
+                        s_dist = s_dist_proj
+                    
+                    if abs(s_dist) < R_eff:
+                        w = np.sqrt(R_eff**2 - s_dist**2)
+                        
+                        # Two choices: pass on right (I_right) or left (I_left)
+                        I_right = [lb_sm, min(ub_sm, d_dist - w)]
+                        I_left = [max(lb_sm, d_dist + w), ub_sm]
+                        
+                        W_right = I_right[1] - I_right[0]
+                        W_left = I_left[1] - I_left[0]
+                        
+                        valid_right = W_right >= min_segment_length
+                        valid_left = W_left >= min_segment_length
+                        
+                        chosen_side = "NONE"
+                        force_side = None
+                        
+                        if getattr(obs, 'vid', None) is not None:
+                            force_side = obstacle_choices.get(obs.vid)
+                        
+                        # Apply track strategy map (corridor bias) if no side is forced yet
+                        if force_side is None and self.corridor_bias:
+                            curr_wp_id = (wp_id + n) % self.n_waypoints
+                            for bias_start, bias_end, bias_side in self.corridor_bias:
+                                if bias_start <= curr_wp_id <= bias_end:
+                                    force_side = bias_side
+                                    break
 
-            # Compute cell on bound for computed distance ub and lb
-            ub_ls = wp.x + ub * np.cos(angle_ub), wp.y + ub * np.sin(
-                angle_ub)
-            lb_ls = wp.x - lb * np.cos(angle_lb), wp.y - lb * np.sin(
-                angle_lb)
+                        if force_side is not None:
+                            if "LEFT" in force_side:
+                                if valid_left:
+                                    lb_sm, ub_sm = I_left
+                                    chosen_side = force_side
+                                elif valid_right:
+                                    lb_sm, ub_sm = I_right
+                                    chosen_side = "RIGHT (fallback)"
+                                else:
+                                    lb_sm, ub_sm = 0.0, 0.0
+                                    chosen_side = "INFEASIBLE"
+                            else: # RIGHT
+                                if valid_right:
+                                    lb_sm, ub_sm = I_right
+                                    chosen_side = force_side
+                                elif valid_left:
+                                    lb_sm, ub_sm = I_left
+                                    chosen_side = "LEFT (fallback)"
+                                else:
+                                    lb_sm, ub_sm = 0.0, 0.0
+                                    chosen_side = "INFEASIBLE"
+                        else:
+                            if valid_right and valid_left:
+                                C_right = (I_right[0] + I_right[1]) / 2.0
+                                C_left = (I_left[0] + I_left[1]) / 2.0
+                                
+                                # Width-biased corridor selection
+                                width_bias_threshold = 0.2  # meters
+                                
+                                if W_left > W_right + width_bias_threshold:
+                                    lb_sm, ub_sm = I_left
+                                    chosen_side = "LEFT"
+                                elif W_right > W_left + width_bias_threshold:
+                                    lb_sm, ub_sm = I_right
+                                    chosen_side = "RIGHT"
+                                else:
+                                    if abs(C_right - C_prev) < abs(C_left - C_prev):
+                                        lb_sm, ub_sm = I_right
+                                        chosen_side = "RIGHT (smooth)"
+                                    else:
+                                        lb_sm, ub_sm = I_left
+                                        chosen_side = "LEFT (smooth)"
+                            elif valid_right:
+                                lb_sm, ub_sm = I_right
+                                chosen_side = "RIGHT (only valid)"
+                            elif valid_left:
+                                lb_sm, ub_sm = I_left
+                                chosen_side = "LEFT (only valid)"
+                            else:
+                                lb_sm, ub_sm = 0.0, 0.0
+                                chosen_side = "INFEASIBLE"
+                                
+                            if getattr(obs, 'vid', None) is not None and chosen_side not in ["NONE", "INFEASIBLE"]:
+                                obstacle_choices[obs.vid] = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
+                        
+                        if not has_printed_corridor_choice and chosen_side != "NONE":
+                            print(f"[TAILING-CORRIDOR] ego_wp: {wp_id} | wp_id: {wp_id + n} | Chosen: {chosen_side} | W_left: {W_left:.2f}m, W_right: {W_right:.2f}m", flush=True)
+                            has_printed_corridor_choice = True
+            
+            if ub_sm < lb_sm:
+                ub_sm = 0.0
+                lb_sm = 0.0
+
+            C_prev = (ub_sm + lb_sm) / 2.0
+
+            # Compute absolute angle of bound cell
+            angle_ub = np.mod(math.pi / 2 + wp.psi + math.pi, 2 * math.pi) - math.pi
+            angle_lb = np.mod(-math.pi / 2 + wp.psi + math.pi, 2 * math.pi) - math.pi
+            
+            # Compute cell on bound for computed distance ub_sm and lb_sm
+            ub_sm_ls = (wp.x + ub_sm * np.cos(angle_ub), wp.y + ub_sm * np.sin(angle_ub))
+            lb_sm_ls = (wp.x - lb_sm * np.cos(angle_lb), wp.y - lb_sm * np.sin(angle_lb))
+            bound_cells_sm = (ub_sm_ls, lb_sm_ls)
+
+            # Compute actual physical boundary for reference (without safety margin)
+            # Reconstruct actual bounds based on current chosen side
+            # This is an approximation for visual/logging purposes
+            ub = ub_sm + safety_margin
+            lb = lb_sm - safety_margin
+            ub_ls = (wp.x + ub * np.cos(angle_ub), wp.y + ub * np.sin(angle_ub))
+            lb_ls = (wp.x - lb * np.cos(angle_lb), wp.y - lb * np.sin(angle_lb))
             bound_cells = (ub_ls, lb_ls)
 
             # Append results
@@ -910,238 +976,7 @@ class ReferencePath:
             wp.ub_sm = ub_sm
             wp.lb_sm = lb_sm
 
-        self.rect_points = []
-        self.upper_cols = []
-        self.lower_cols = []
-        self.free_segs = []
-        self.select_free_segs = []
-
-        # self.COUNT += 1
-        # show = False
-        # if self.COUNT == 100:
-        #     show = True
-        #     self.COUNT = 0
-
-        # compute free segments for each waypoints in horizon
-        free_segments_hor = []
-        for n in range(N):
-            wp = self.get_waypoint(wp_id+n)
-            free_segments = self._compute_free_segments(wp, min_width)
-            free_segments_hor.append(free_segments)
-            self.free_segs.extend(free_segments)
-
-        # Iterate over horizon
-        n = 0
-        while n < N:
-
-            # get corresponding waypoint
-            wp = self.get_waypoint(wp_id+n)
-
-            # Get list of free segments
-            free_segments = free_segments_hor[n]
-
-            # Iterate over free segments for current waypoint
-            if len(free_segments) >= 2:
-                free_segments_indices = [[idx for idx in range(len(free_segments))]]
-                for i in range(n+1, n+5):
-                    if i >= N:
-                        break
-                    free_segments = free_segments_hor[i]
-                    if len(free_segments) == 0:
-                      break
-                    else:
-                      free_segments_indices.append([idx for idx in range(len(free_segments))])
-
-                free_segments_indices_combinations = itertools.product(*free_segments_indices)
-                # if show:
-                #     print(f"n :{n}, free_segments_indices: {free_segments_indices}")
-
-                def calculate_combination_total_segment_length(index_combination, ub_pw, lb_pw):
-                    total_segment_length = 0.0
-
-                    for i, segment_index in enumerate(index_combination):
-                        ub_fs, lb_fs = free_segments_hor[n+i][segment_index]
-
-                        mean_prev = (np.array(ub_pw) + np.array(lb_pw)) / 2.
-                        mean_fs = (np.array(ub_fs) + np.array(lb_fs)) / 2.
-
-                        if has_collision_in_line(self.map, mean_prev, mean_fs):
-                            self.upper_cols.append([[mean_prev[0], mean_fs[0]], [mean_prev[1], mean_fs[1]]])
-                            return -1000000.0 # penalty because has collision!
-
-                        total_segment_length += dist(ub_fs[0], ub_fs[1], lb_fs[0], lb_fs[1])
-                        ub_pw = ub_fs
-                        lb_pw = lb_fs
-
-                    return total_segment_length
-
-                combination_segment_length = []
-                combination_indices = []
-                for combination in free_segments_indices_combinations:
-                    if n > 0:
-                        ub_pw, lb_pw = border_cells_hor[n-1]
-                    else:
-                        if pose is not None:
-                            ub_pw, lb_pw =  [pose[0], pose[1]], [pose[0], pose[1]]
-                        else:
-                            ub_pw, lb_pw =  [wp.x, wp.y], [wp.x, wp.y]
-
-                    total_segment_length = calculate_combination_total_segment_length(combination, ub_pw, lb_pw)
-                    combination_segment_length.append(total_segment_length)
-                    combination_indices.append(combination)
-
-                max_area = max(combination_segment_length)
-                max_area_index = combination_segment_length.index(max_area)
-                max_area_combination_indices = combination_indices[max_area_index]
-
-                # if show:
-                #     print(f"max_area_combination_indices: {max_area_combination_indices}")
-                #     print(f"n: {n}, combination_segment_length: {combination_segment_length}, combination_indices: {combination_indices}")
-
-                for i in max_area_combination_indices:
-                    wp = self.get_waypoint(wp_id+n)
-                    ub_ls, lb_ls = free_segments_hor[n][i]
-                    add_constraint(wp, ub_ls, lb_ls)
-                    n += 1
-
-            # Select free segment in case of only one candidate
-            elif len(free_segments) == 1:
-                ub_ls, lb_ls = free_segments[0]
-                add_constraint(wp, ub_ls, lb_ls)
-                n += 1  # increment waypoint index
-
-            # Set waypoint coordinates as bound cells if no feasible
-            # segment available
-            else:
-                print(f"No feasible free segment found! wp_id: {wp_id}, n: {n}")
-                ub_ls, lb_ls = (wp.x, wp.y), (wp.x, wp.y)
-
-                # left_angle = np.mod(wp.psi + math.pi / 2 + math.pi,
-                #                  2 * math.pi) - math.pi
-                # right_angle = np.mod(wp.psi - math.pi / 2 + math.pi,
-                #                    2 * math.pi) - math.pi
-
-                # ub_ls = (wp.x + min_width * np.cos(left_angle),
-                #          wp.y + min_width * np.sin(left_angle))
-                # lb_ls = (wp.x + min_width * np.cos(right_angle),
-                #          wp.y + min_width * np.sin(right_angle))
-
-                add_constraint(wp, ub_ls, lb_ls)
-
-                n += 1  # increment waypoint index
-
-        # return np.array(ub_hor), np.array(lb_hor), np.array(border_cells_hor_sm)
-
-        self.modified_ub = []
-        self.modified_lb = []
-
-        # safety_marginを考慮したborder_cellsを滑らかにする
-        # border_cells_smの連続する点を直線で結び、前後の直線がなす角がしきい値より大きい場合、
-        # 間の点を一つ飛ばして直線を引きなおすようにborder_cells_smを更新する
-        ANGLE_TH = np.deg2rad(45.0)
-        SEARCH_HORIZON = 3 # >=1
-
-        for n in reversed(range(SEARCH_HORIZON, N-SEARCH_HORIZON+1)):
-            mid_index = n
-            waypoint_mid = self.get_waypoint(wp_id+n)
-            wp_mid = (waypoint_mid.x, waypoint_mid.y)
-            new_border_cells_hor_sm_mid = [border_cells_hor_sm[mid_index][0], border_cells_hor_sm[mid_index][1]]
-            new_bound_sm = [waypoint_mid.ub_sm, waypoint_mid.lb_sm]
-            # スムージングが ub<lb を作った場合に巻き戻すための原値スナップショット
-            orig_ub_hor_mid = ub_hor[mid_index]
-            orig_lb_hor_mid = lb_hor[mid_index]
-            orig_border_cells_mid = [border_cells_hor_sm[mid_index][0], border_cells_hor_sm[mid_index][1]]
-            orig_bound_sm = [waypoint_mid.ub_sm, waypoint_mid.lb_sm]
-
-            before_indeices = []
-            after_indices = []
-            for i in range(1, SEARCH_HORIZON+1):
-                before_index = mid_index - i
-                after_index = mid_index + i
-                if before_index >= 0:
-                    before_indeices.append(before_index)
-                if after_index < N:
-                    after_indices.append(after_index)
-            # print(f"n: {n}, before_indeices: {before_indeices}, after_indices: {after_indices}")
-            border_cell_indices_combinations = list(itertools.product(before_indeices, after_indices))
-            # print(f"n: {n}, border_cell_indices_combinations: {border_cell_indices_combinations}")
-
-            def validate_intersection(old_bound, new_bound, new_bound_cell, border_cell_after, bound_sign):
-                # boundが安全寄りになっている場合のみ更新を許可
-                if bound_sign * new_bound > bound_sign * old_bound:
-                    # print(f"n: {n} has invalid bound! old: {old_bound}, new: {new_bound}")
-                    return False
-
-                # 更新後のbound cellが障害物に被っていないか確認
-                t_x, t_y = self.map.w2m(new_bound_cell[0], new_bound_cell[1])
-                if self._is_obstacle_occupied(t_x, t_y):
-                    # print(f"n: {n} has collision!")
-                    return False
-                # if has_collision_in_line(self.map, border_cell_after, new_bound_cell):
-                #     # print(f"n: {n} has collision!")
-                #     return False
-
-                return True
-
-            for dir in ['upper', 'lower']:
-                index = 0 if dir == 'upper' else 1
-                bound_sign = 1 if dir == 'upper' else -1
-                bound_hor = ub_hor if dir == 'upper' else lb_hor
-                bound_mid = waypoint_mid.ub_sm if bound_sign == 1 else waypoint_mid.lb_sm
-                border_cell_mid = border_cells_hor_sm[mid_index][index]
-
-                def try_update_border_cell_for_safety(border_cell_before, border_cell_after, is_nearest_pair: bool):
-                    angle = calculate_angle(border_cell_before, border_cell_mid, border_cell_after)
-
-                    if np.abs(angle) < ANGLE_TH:
-                        return True if is_nearest_pair else False
-
-                    # 前後のborder_cellを結んだ直線と、間のwpとborder_cellを結んだ直線の交点を求める
-                    new_border_cell_mid = calculate_intersection(wp_mid, border_cell_mid, border_cell_before, border_cell_after)
-                    if new_border_cell_mid is None:
-                        return False
-                    if not (np.isfinite(new_border_cell_mid[0]) and np.isfinite(new_border_cell_mid[1])):
-                        return False
-
-                    # 前記直線の交点とwaypoint_midの距離を計算
-                    new_bound_mid = compute_bound(waypoint_mid, new_border_cell_mid)
-                    if not np.isfinite(new_bound_mid):
-                        return False
-
-                    # 交点が安全寄りで、干渉なしであれば更新する
-                    if not validate_intersection(bound_mid, new_bound_mid, new_border_cell_mid, border_cell_after, bound_sign):
-                        return False
-
-                    # self.modified_ub.append([ub0, new_ub1])
-                    # self.modified_ub.append([new_ub1, ub2])
-                    bound_hor[mid_index] = new_bound_mid
-                    new_border_cells_hor_sm_mid[index] = new_border_cell_mid
-                    new_bound_sm[index] = new_bound_mid
-
-                    return True
-
-                for i, (before_index, after_index) in enumerate(border_cell_indices_combinations):
-                    is_nearest_pair = (i == 0)
-                    if try_update_border_cell_for_safety(border_cells_hor_sm[before_index][index], border_cells_hor_sm[after_index][index], is_nearest_pair):
-                        break
-
-            # 上下境界を独立に safer-side へ寄せた結果 ub<lb のクロスオーバが
-            # 生じた場合は OSQP が infeasible になり MPC ノードごと落ちる。
-            # スムージングは「あれば嬉しい最適化」なので、安全のため原値に巻き戻す。
-            if new_bound_sm[0] < new_bound_sm[1]:
-                ub_hor[mid_index] = orig_ub_hor_mid
-                lb_hor[mid_index] = orig_lb_hor_mid
-                new_border_cells_hor_sm_mid = orig_border_cells_mid
-                new_bound_sm = orig_bound_sm
-
-            # update border cells (border_cells_horは以降使用しないので更新不要)
-            border_cells_hor_sm[mid_index] = new_border_cells_hor_sm_mid
-            waypoint_mid.dynamic_border_cells = tuple(new_border_cells_hor_sm_mid)
-            waypoint_mid.ub_sm = new_bound_sm[0]
-            waypoint_mid.lb_sm = new_bound_sm[1]
-
-        return np.array(ub_hor), np.array(lb_hor), np.array(border_cells_hor_sm)
-
+        return np.array(ub_hor), np.array(lb_hor), border_cells_hor_sm
 
 if __name__ == '__main__':
 

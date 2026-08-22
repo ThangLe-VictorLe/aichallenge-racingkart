@@ -252,6 +252,7 @@ class MPCController(Node):
             self.declare_parameter("accel_low_pass_gain", mpc_cfg.accel_low_pass_gain)
             self.declare_parameter("steer_low_pass_gain", mpc_cfg.steer_low_pass_gain)
             self.declare_parameter("wp_id_offset", mpc_cfg.wp_id_offset)
+            self.declare_parameter("bicycle_model_width", self._cfg.bicycle_model.width)
 
         def param_cb(parameters):
             cfg_mpc = self._cfg.mpc # type: ignore
@@ -277,9 +278,9 @@ class MPCController(Node):
 
             for param in parameters:
                 if param.name == "v_max" and param.type_ == Parameter.Type.DOUBLE:
-                    mpc_cfg.v_max = param.value
-                    self._mpc.update_v_max(kmh_to_m_per_sec(param.value))
-                    v_ref: List[float] = [kmh_to_m_per_sec(param.value)] * len(self._reference_path.waypoints)
+                    mpc_cfg.v_max = kmh_to_m_per_sec(param.value)
+                    self._mpc.update_v_max(mpc_cfg.v_max)
+                    v_ref: List[float] = [mpc_cfg.v_max] * len(self._reference_path.waypoints)
                     self._reference_path.set_v_ref(v_ref)
 
                     self.get_logger().warn(f"v_max was updated to '{param.value}' [km/h]")
@@ -294,7 +295,6 @@ class MPCController(Node):
                     update_Q(1, param.value)
                 elif param.name == "Q2" and param.type_ == Parameter.Type.DOUBLE:
                     update_Q(2, param.value)
-
 
                 elif param.name == "R0" and param.type_ == Parameter.Type.DOUBLE:
                     update_R(0, param.value)
@@ -325,6 +325,14 @@ class MPCController(Node):
                     mpc_cfg.wp_id_offset = param.value
                     self._mpc.update_wp_id_offset(param.value)
                     self.get_logger().warn(f"wp_id_offset was updated to '{param.value}'")
+
+                elif param.name in ("bicycle_model_width", "bicycle_model.width") and param.type_ == Parameter.Type.DOUBLE:
+                    self._cfg.bicycle_model.width = param.value
+                    if hasattr(self, '_car') and self._car is not None:
+                        self._car.width = param.value
+                    if hasattr(self, '_mpc') and self._mpc is not None and hasattr(self._mpc, 'model') and self._mpc.model is not None:
+                        self._mpc.model.width = param.value
+                    self.get_logger().warn(f"bicycle_model.width was updated to '{param.value}' [m]")
 
 
             return SetParametersResult(successful=True)
@@ -489,12 +497,19 @@ class MPCController(Node):
 
         self._trajectory: Optional[Trajectory] = None
         self._path_constraints = None
+        
+        # Unconditionally initialize _waypoint_xy for prediction marker publishing
+        wps = self._reference_path.waypoints
+        self._waypoint_xy = np.asarray([(wp.x, wp.y) for wp in wps], dtype=np.float64)
 
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
             self._static_obstacles: List[Obstacle] = create_obstacles()
+            if self._static_obstacles:
+                self._map.add_obstacles(self._static_obstacles)
+            self._map.save_static_map()
             self._dynamic_obstacles: List[Obstacle] = []
-            self._obstacles_updated = bool(self._static_obstacles)
+            self._obstacles_updated = False
             v2x_cfg = self._cfg.v2x_obstacle_avoidance  # type: ignore
             self._v2x_tracker = V2XVehicleTracker(
                 v_max_safety=float(v2x_cfg.v_max_safety),
@@ -513,9 +528,7 @@ class MPCController(Node):
             self._v2x_corridor_threshold_sq = (
                 ref_max_width / 2.0 + self._v2x_vehicle_radius + 0.5
             ) ** 2
-            wps = self._reference_path.waypoints
-            self._waypoint_xy = np.asarray(
-                [(wp.x, wp.y) for wp in wps], dtype=np.float64)
+
             # Build cumulative arc-length array for Frenet-frame proximity check
             diffs = np.diff(self._waypoint_xy, axis=0)
             seg_lengths = np.hypot(diffs[:, 0], diffs[:, 1])
@@ -524,19 +537,31 @@ class MPCController(Node):
             # Proximity gate params (with hysteresis)
             self._v2x_activation_dist = float(v2x_cfg.activation_distance_m)  # type: ignore
             self._v2x_deactivation_dist = float(v2x_cfg.deactivation_distance_m)  # type: ignore
-            self._overtaking_steer_gain = float(v2x_cfg.overtaking_steer_gain)  # type: ignore
-            _ot_inc = getattr(v2x_cfg, 'overtaking_steer_gain_increment', None)
-            self._overtaking_gain_increment = float(_ot_inc) if _ot_inc is not None else 0.0
-            _ot_max = getattr(v2x_cfg, 'overtaking_steer_gain_max', None)
-            self._overtaking_gain_max = float(_ot_max) if _ot_max is not None else None
-            # Accumulated overtaking gain runtime state.
-            # Increments each time overtaking fires right after a recovery cycle.
-            self._overtaking_cycle_count = 0
-            self._current_overtaking_steer_gain = self._overtaking_steer_gain
-            # Flag set whenever a recovery cycle completes, consumed when overtaking next activates.
-            self._post_recovery_overtake_pending = False
+            self._min_overtaking_steer_gain = 1.2 # Default, updated dynamically
+
+            # Tailing & Overtaking Config
+            self._v2x_tailing_distance = float(getattr(v2x_cfg, 'tailing_distance_m', 15.0))
+            
+            # Strict Tailing Config (Real No-Overtake Zones)
+            self._strict_tailing_speed_gain = float(getattr(v2x_cfg, 'strict_tailing_speed_gain', 0.1))
+            self._strict_tailing_min_delta = float(getattr(v2x_cfg, 'strict_tailing_min_delta', 0.5))
+            self._strict_no_overtake_zones = getattr(v2x_cfg, 'strict_no_overtake_zones', [])
+            
+            self._corridor_bias = getattr(v2x_cfg, 'corridor_bias', [])
+            
+            self._fast_opponent_cfg = getattr(v2x_cfg, 'fast_opponent', None)
+            self._slow_opponent_cfg = getattr(v2x_cfg, 'slow_opponent', None)
+            
+            # Default fallback if config is missing
+            self._v2x_fast_threshold = float(getattr(self._fast_opponent_cfg, 'threshold_kmh', 18.0)) if self._fast_opponent_cfg else 18.0
             # Runtime state
             self._v2x_avoidance_active = False
+            self._is_launch_mode_active = False
+            self._prev_launch_mode_active = False
+            # Minimum time (seconds) the V2X active state must hold before it can flip again.
+            # Set to 2.0s to prevent premature deactivation when ego is stopped near opponent.
+            self._v2x_min_dwell_sec = 5.0
+            self._v2x_last_state_change_time: Optional[float] = None
 
         # --- Debug Visualization ---
         # Read debug_visualization section from config (all flags default to False).
@@ -574,9 +599,7 @@ class MPCController(Node):
             self._recovery_steer_gain = float(getattr(recovery_cfg, 'recovery_steer_gain', 1.0))
             self._post_recovery_steer_gain = float(getattr(recovery_cfg, 'post_recovery_steer_gain', 1.0))
             self._recovery_cooldown_sec = float(getattr(recovery_cfg, 'cooldown_sec', 2.0))
-            self._post_recovery_gain_increment = float(getattr(recovery_cfg, 'post_recovery_steer_gain_increment', 0.0))
-            _max = getattr(recovery_cfg, 'post_recovery_steer_gain_max', None)
-            self._post_recovery_gain_max = float(_max) if _max is not None else None
+            self._recovery_cooldown_Q0 = float(getattr(recovery_cfg, 'cooldown_Q0', 10000000.0))
             raw_disabled = getattr(recovery_cfg, 'disabled_waypoints', None)
             if raw_disabled is None:
                 raw_disabled = getattr(recovery_cfg, 'disabled_waypoint_ranges', None)
@@ -589,9 +612,10 @@ class MPCController(Node):
             self._recovery_steer_gain = 1.0
             self._post_recovery_steer_gain = 1.0
             self._recovery_cooldown_sec = 2.0
-            self._post_recovery_gain_increment = 0.0
-            self._post_recovery_gain_max = None
+            self._recovery_cooldown_Q0 = 10000000.0
             raw_disabled = None
+
+        self._default_Q0 = float(self._cfg.mpc.Q[0])
 
         self._recovery_disabled_ranges: List[Tuple[int, int]] = []
         if raw_disabled is not None:
@@ -607,6 +631,7 @@ class MPCController(Node):
 
         self._recovery_state = "NORMAL"
         self._stuck_start_time = None
+        self._node_start_time = None
         self._recovering_start_time = None
         self._cooldown_start_time = None
         # Accumulated post-recovery steer gain counters.
@@ -616,12 +641,37 @@ class MPCController(Node):
         self._recovery_cycle_count = 0
         self._current_post_recovery_steer_gain = self._post_recovery_steer_gain
         # Only allow stuck detection after the kart has moved at least once
-        # (prevents false trigger at race start when v=0 but MPC commands speed)
         self._has_moved = False
 
         # save config
         if self._cfg.common.save_config:
             self._save_config()
+
+    @staticmethod
+    def _interpolate_gain(gain_config, current_v_kmh, default_gain=1.2):
+        if isinstance(gain_config, list) and len(gain_config) > 0:
+            try:
+                # Expecting [[speed1, gain1], [speed2, gain2], ...]
+                pts = sorted(gain_config, key=lambda x: x[0])
+                if current_v_kmh <= pts[0][0]:
+                    return float(pts[0][1])
+                if current_v_kmh >= pts[-1][0]:
+                    return float(pts[-1][1])
+                # Interpolate
+                for i in range(len(pts) - 1):
+                    if pts[i][0] <= current_v_kmh <= pts[i+1][0]:
+                        v1, g1 = float(pts[i][0]), float(pts[i][1])
+                        v2, g2 = float(pts[i+1][0]), float(pts[i+1][1])
+                        ratio = (current_v_kmh - v1) / (v2 - v1) if v2 > v1 else 0.0
+                        return float(g1 + ratio * (g2 - g1))
+            except Exception:
+                pass
+            return default_gain
+        else:
+            try:
+                return float(gain_config)
+            except (TypeError, ValueError):
+                return default_gain
 
     def _save_config(self) -> None:
         now = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -748,18 +798,33 @@ class MPCController(Node):
             self._enable_control = True
             self._has_moved = False
             self._recovery_state = "NORMAL"
+            if hasattr(self, '_default_Q0'):
+                self._set_Q0(self._default_Q0)
             self._stuck_start_time = None
         elif not msg.data and self._enable_control:
             self._enable_control = False
             self._has_moved = False
             self._recovery_state = "NORMAL"
+            if hasattr(self, '_default_Q0'):
+                self._set_Q0(self._default_Q0)
             self._stuck_start_time = None
+
+    def _set_Q0(self, q0_value: float):
+        if self._cfg.mpc.Q[0] == q0_value:
+            return
+        self._cfg.mpc.Q[0] = q0_value
+        if hasattr(self, '_mpc_cfg') and hasattr(self, '_mpc'):
+            self._mpc_cfg.Q = sparse.diags(self._cfg.mpc.Q)
+            self._mpc.update_Q(self._mpc_cfg.Q)
+            self.get_logger().info(f"[RECOVERY DEBUG] MPC Q[0] dynamically updated to {q0_value}")
 
     def _path_constraints_callback(self, msg: PathConstraints):
         self._reference_path.set_path_constraints(
             msg.upper_bounds, msg.lower_bounds, msg.rows, msg.cols)
 
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
+        import time
+        t_v2x_start = time.time()
         self._v2x_tracker.update(msg)
 
         # === PROXIMITY GATE WITH HYSTERESIS ===
@@ -775,33 +840,65 @@ class MPCController(Node):
 
         any_opponent_in_activate_range = False
         any_opponent_in_deactivate_range = False
-        for v in msg.vehicles:
+        
+        ego_x = self._car.temporal_state.x if self._car else 0.0
+        ego_y = self._car.temporal_state.y if self._car else 0.0
+
+        min_opponent_ds = float('inf')
+        nearest_opponent_vid = None
+
+        for idx, v in enumerate(msg.vehicles):
             opp_x = float(v.position.x)
             opp_y = float(v.position.y)
+            
+            # Check if this vehicle is actually ego
+            dist_to_ego = np.hypot(opp_x - ego_x, opp_y - ego_y)
+            if dist_to_ego < 0.5:  # 0.5m threshold to filter out self
+                continue
+                
             # Snap opponent to nearest waypoint
             dxy = self._waypoint_xy - np.array([opp_x, opp_y], dtype=np.float64)
             dists_sq = np.einsum('ij,ij->i', dxy, dxy)
             nearest_wp_id = int(np.argmin(dists_sq))
-            # Skip if this is the ego vehicle (same position as us)
-            if np.sqrt(dists_sq[nearest_wp_id]) < 0.1:
-                continue
             opp_s = self._waypoint_s[nearest_wp_id]
+            
             # Signed forward distance along raceline; wraps cleanly on circular track
             ds = (opp_s - ego_s) % track_len
+            
             # ds in (0, track_len): small = just ahead, large = behind us
-            if 0.0 < ds <= activate_threshold:
+            # Allow opponent to be slightly behind us (e.g. ds > track_len - 2.0) and still keep avoidance active
+            if 0.0 <= ds <= activate_threshold or ds > track_len - 2.0:
                 any_opponent_in_activate_range = True
-                break
-            if 0.0 < ds <= deactivate_threshold:
+            if 0.0 <= ds <= deactivate_threshold or ds > track_len - 3.0:
                 any_opponent_in_deactivate_range = True
+                
+                # Track the nearest opponent for speed matching (tailing)
+                actual_ds = ds if ds <= deactivate_threshold else ds - track_len
+                if actual_ds > 0 and actual_ds < min_opponent_ds:
+                    min_opponent_ds = actual_ds
+                    nearest_opponent_vid = v.vehicle_id
+                    
+        self._nearest_opponent_vid = nearest_opponent_vid
+        self._nearest_opponent_ds = min_opponent_ds
 
-        # Apply hysteresis: activate on close approach, deactivate only when all clear
+        # Apply hysteresis: activate on close approach, deactivate only when all clear.
+        # Additionally enforce a minimum dwell time to prevent wp_id jitter from toggling
+        # the state multiple times per second.
         prev_active = self._v2x_avoidance_active
+        now_wall = self.get_clock().now().nanoseconds / 1e9
+        dwell_elapsed = (
+            (now_wall - self._v2x_last_state_change_time) >= self._v2x_min_dwell_sec
+            if self._v2x_last_state_change_time is not None else True
+        )
+        desired_active = prev_active  # default: hold current
         if any_opponent_in_activate_range:
-            self._v2x_avoidance_active = True
+            desired_active = True
         elif not any_opponent_in_deactivate_range:
-            self._v2x_avoidance_active = False
-        # else: opponent is between activate and deactivate thresholds — hold current state
+            desired_active = False
+        # Only flip if the minimum dwell period has elapsed
+        if desired_active != prev_active and dwell_elapsed:
+            self._v2x_avoidance_active = desired_active
+            self._v2x_last_state_change_time = now_wall
 
         if self._v2x_avoidance_active != prev_active:
             if self._v2x_avoidance_active:
@@ -819,7 +916,7 @@ class MPCController(Node):
                         f"overtaking_steer_gain -> {self._current_overtaking_steer_gain:.2f}")
                 self.get_logger().warn(
                     "[V2X] Overtaking mode ACTIVATED — opponent within "
-                    f"{activate_threshold:.0f} m ahead. Steer gain -> {self._current_overtaking_steer_gain}")
+                    f"{activate_threshold:.0f} m ahead.")
             else:
                 self.get_logger().info(
                     "[V2X] Overtaking mode DEACTIVATED — no opponent within "
@@ -830,22 +927,33 @@ class MPCController(Node):
 
         if self._v2x_avoidance_active:
             predictions = self._v2x_tracker.predict_all(self._v2x_t_samples)
-            self._dynamic_obstacles = predictions_to_obstacles(
-                predictions, self._v2x_vehicle_radius)
-            # Only trigger map update if not in recovery — wall proximity makes solver infeasible
-            if self._recovery_state not in ("RECOVERING", "COOLDOWN"):
-                self._obstacles_updated = True
+            new_dynamic = predictions_to_obstacles(predictions, self._v2x_vehicle_radius)
+            
+            # Populate Frenet s for each obstacle to prevent ghost projection bugs in sharp curves
+            if self._waypoint_xy.size > 0:
+                for ob in new_dynamic:
+                    dxy = self._waypoint_xy - np.array([ob.cx, ob.cy], dtype=np.float64)
+                    dists_sq = np.einsum('ij,ij->i', dxy, dxy)
+                    nearest_wp = int(np.argmin(dists_sq))
+                    ob.s = self._waypoint_s[nearest_wp]
+
+            # Only trigger a map rebuild if obstacle positions changed meaningfully (>0.1m).
+            # This prevents continuous corridor redraw on every V2X callback when the
+            # opponent is stationary or barely moving (e.g. ego kart stopped in manual mode).
+            if self._obstacles_changed(new_dynamic):
+                self._dynamic_obstacles = new_dynamic
         else:
             # Opponent left range — clear dynamic obstacles so map resets to clean static corridor
             if self._dynamic_obstacles:
                 self._dynamic_obstacles = []
-                self._obstacles_updated = True  # trigger map reset to clear old obstacle blobs
 
         # --- V2X diagnostic terminal log (throttled, enabled via config) ---
         if self._dbg_v2x_log:
             self._v2x_diagnostic_log(
                 msg, ego_wp_id, ego_s, track_len,
                 activate_threshold, deactivate_threshold)
+                
+        pass
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
         if not obstacles or self._waypoint_xy.size == 0:
@@ -858,6 +966,22 @@ class MPCController(Node):
             if np.min(np.einsum('ij,ij->i', dxy, dxy)) <= thr_sq:
                 kept.append(ob)
         return kept
+
+    def _obstacles_changed(self, new_obstacles: List[Obstacle], threshold: float = 0.1) -> bool:
+        """Return True if the new obstacle list differs meaningfully from the current one.
+
+        Compares list length and, if equal, the max displacement of any obstacle.
+        Prevents continuous map rebuilds when the opponent is stationary or barely moving.
+        """
+        old = self._dynamic_obstacles
+        if len(new_obstacles) != len(old):
+            return True
+        if not new_obstacles:
+            return False
+        for o_new, o_old in zip(new_obstacles, old):
+            if (o_new.cx - o_old.cx) ** 2 + (o_new.cy - o_old.cy) ** 2 > threshold ** 2:
+                return True
+        return False
 
     def _border_cells_callback(self, msg: BorderCells):
         self._reference_path.set_border_cells(
@@ -878,9 +1002,6 @@ class MPCController(Node):
             self.get_logger().info(f'\033[32mLap {self._current_laps} completed! Lap time: {self._last_lap_time} s\033[0m')
             self._lap_times[self._current_laps] = self._last_lap_time
             self._current_laps = laps
-            # Notify SteerGainConfigurator so it switches to warm-tire gains from lap 2 onward
-            if self._steer_gain_configurator is not None:
-                self._steer_gain_configurator.set_lap(self._current_laps)
 
         self._last_lap_time = lap_time
 
@@ -933,6 +1054,25 @@ class MPCController(Node):
         if self.USE_OBSTACLE_AVOIDANCE and self._cfg.reference_path.use_path_constraints_topic: # type: ignore
             self._wait_until_message_received(lambda: self._reference_path.path_constraints, 'path constraints', timeout)
 
+    def _compute_corridor_width_at_ego(self) -> float:
+        """Return the minimum corridor width (ub - lb) across the current MPC horizon
+        at the ego waypoint, reading dynamic path constraints directly.
+        This is independent of the MPC solver's use_obstacle_avoidance flag so it
+        works correctly even when the solver has OA suppressed (e.g. while stopped)."""
+        try:
+            pc = self._reference_path.path_constraints
+            if pc is None or len(pc) < 2:
+                return float('inf')  # no constraints yet — safe fallback
+            ub_all = pc[0]  # shape: (n_waypoints, N)
+            lb_all = pc[1]
+            wp_id = (self._mpc.model.wp_id + 1) % len(ub_all)
+            ub_row = ub_all[wp_id]  # array of length N
+            lb_row = lb_all[wp_id]
+            widths = ub_row - lb_row
+            return float(np.min(widths))  # most restrictive point in the horizon
+        except Exception:
+            return float('inf')  # safe fallback: do not trigger stop
+
     # =========================================================================
     # Debug Visualization Helpers
     # =========================================================================
@@ -940,6 +1080,9 @@ class MPCController(Node):
     def _v2x_diagnostic_log(self, msg, ego_wp_id, ego_s, track_len,
                              activate_threshold, deactivate_threshold) -> None:
         """Throttled terminal log: prints V2X vehicle positions/distances and gate state."""
+        if getattr(self, '_recovery_state', "NORMAL") != "NORMAL":
+            return
+            
         self._v2x_dbg_counter += 1
         if self._v2x_dbg_counter % 10 != 1:
             return
@@ -956,7 +1099,10 @@ class MPCController(Node):
             nearest_dist = float(np.sqrt(dists_sq[nearest_wp]))
             opp_s = self._waypoint_s[nearest_wp]
             ds = (opp_s - ego_s) % track_len
-            is_ego = nearest_dist < 0.8
+            ego_x = float(self._odom.pose.pose.position.x) if self._odom is not None else 0.0
+            ego_y = float(self._odom.pose.pose.position.y) if self._odom is not None else 0.0
+            dist_to_ego = np.hypot(opp_x - ego_x, opp_y - ego_y)
+            is_ego = (dist_to_ego < 0.5)
             lines.append(
                 f"  vid={v.vehicle_id}  pos=({opp_x:.1f},{opp_y:.1f})"
                 f"  wp={nearest_wp}  dist_to_wp={nearest_dist:.2f}m"
@@ -993,14 +1139,18 @@ class MPCController(Node):
         start_id = self._mpc.model.wp_id
         n_wps = len(wps)
 
-        # Seed both strips at the ego kart's actual world position so the
-        # corridor always originates from the kart, not the first horizon wp.
-        ego_x = float(self._odom.pose.pose.position.x) if self._odom is not None else 0.0
-        ego_y = float(self._odom.pose.pose.position.y) if self._odom is not None else 0.0
-        ego_pt = Point(x=ego_x, y=ego_y, z=0.3)
+        left_pts: List[Point] = []
+        right_pts: List[Point] = []
 
-        left_pts: List[Point] = [ego_pt]
-        right_pts: List[Point] = [ego_pt]
+        # Use the waypoint nearest to the ego's actual world position as start,
+        # not mpc.model.wp_id which can jump forward past obstacles when the
+        # solver is confused, causing the corridor to skip the blocking section.
+        if self._odom is not None:
+            ego_x = self._odom.pose.pose.position.x
+            ego_y = self._odom.pose.pose.position.y
+            dxy = self._waypoint_xy - np.array([ego_x, ego_y], dtype=np.float64)
+            start_id = int(np.argmin(np.einsum('ij,ij->i', dxy, dxy)))
+        # else keep start_id = mpc.model.wp_id (set above)
 
         for k in range(N):
             wp = wps[(start_id + k) % n_wps]
@@ -1120,16 +1270,21 @@ class MPCController(Node):
             nearest_vid = "?"
             for v in getattr(self, '_last_v2x_msg', type('_Empty', (), {'vehicles': []})()).vehicles:
                 opp_x, opp_y = float(v.position.x), float(v.position.y)
+                
+                # Check if this vehicle is actually ego
+                ego_x = self._car.temporal_state.x if self._car else 0.0
+                ego_y = self._car.temporal_state.y if self._car else 0.0
+                if np.hypot(opp_x - ego_x, opp_y - ego_y) < 0.5:
+                    continue
+                    
                 dxy = self._waypoint_xy - np.array([opp_x, opp_y], dtype=np.float64)
                 dists_sq = np.einsum('ij,ij->i', dxy, dxy)
                 nearest_wp = int(np.argmin(dists_sq))
-                if np.sqrt(dists_sq[nearest_wp]) < 0.8:
-                    continue
                 ds = (self._waypoint_s[nearest_wp] - ego_s) % self._total_track_s
                 if ds < min_ds:
                     min_ds = ds
                     nearest_vid = v.vehicle_id
-            gain = self._current_overtaking_steer_gain
+            gain = self._mpc_cfg.steering_tire_angle_gain_var
             txt.text = f"V2X: ACTIVE | {nearest_vid} @ {min_ds:.0f}m | steer={gain:.1f}"
             txt.color = ColorRGBA(r=1.0, g=0.3, b=0.0, a=1.0)  # orange-red
         else:
@@ -1140,7 +1295,28 @@ class MPCController(Node):
         ma.markers.append(txt)  # type: ignore
         self._v2x_status_pub.publish(ma)
 
-    def _publish_mpc_pred_marker(self, x_pred, y_pred):
+    def _publish_mpc_pred_marker(self, spatial_state_prediction):
+        if self._odom is None or self._mpc is None:
+            return
+
+        # Use the waypoint nearest to the ego's actual world position as start,
+        # preventing the prediction visual from jumping over the opponent
+        ego_x = self._odom.pose.pose.position.x
+        ego_y = self._odom.pose.pose.position.y
+        dxy = self._waypoint_xy - np.array([ego_x, ego_y], dtype=np.float64)
+        start_id = int(np.argmin(np.einsum('ij,ij->i', dxy, dxy)))
+
+        N = min(self._mpc_cfg.N, len(spatial_state_prediction))
+        
+        x_pred, y_pred = [], []
+        # First state is current state (n=0, 1 are handled implicitly in solver, but prediction array starts at n=0)
+        # N steps means n ranges from 0 to N. The original loop did range(2, N). We match that.
+        for n in range(2, N):
+            associated_waypoint = self._mpc.model.reference_path.get_waypoint(start_id + n)
+            predicted_temporal_state = self._mpc.model.s2t(associated_waypoint, spatial_state_prediction[n, :])
+            x_pred.append(predicted_temporal_state.x)
+            y_pred.append(predicted_temporal_state.y)
+
         pred_marker_array = MarkerArray()
         m = Marker()
         m.header.frame_id = "map"
@@ -1214,6 +1390,10 @@ class MPCController(Node):
     def _control(self):
         now = self.get_clock().now()
         t = (now - self._t_start).nanoseconds / 1e9
+        now_sec = now.nanoseconds / 1e9
+        
+        if self._node_start_time is None:
+            self._node_start_time = now_sec
         dt = (now - self._last_t).nanoseconds / 1e9
 
         self._last_t = now
@@ -1243,17 +1423,10 @@ class MPCController(Node):
                 sys.exit(1)
             # plot_reference_path(self._car)
 
-        if self.USE_OBSTACLE_AVOIDANCE and self._obstacles_updated:
-            self._obstacles_updated = False
-            self._map.reset_map()
-            if self._v2x_avoidance_active and self._recovery_state == "NORMAL":
-                # Full obstacle avoidance: rasterize opponent predictions onto occupancy map
-                filtered_dynamic = self._filter_obstacles_to_corridor(self._dynamic_obstacles)
-                self._map.add_obstacles(self._static_obstacles + filtered_dynamic)
-            else:
-                # No active opponent or in recovery: use only static track boundaries
-                # (prevents solver infeasibility from near-wall positions during recovery)
-                self._map.add_obstacles(self._static_obstacles)
+        if hasattr(self, '_mpc') and hasattr(self, '_corridor_bias'):
+            self._mpc.model.reference_path.corridor_bias = self._corridor_bias
+
+        if self.USE_OBSTACLE_AVOIDANCE:
             self._reference_path.reset_dynamic_constraints()
 
         is_colliding = False
@@ -1269,18 +1442,26 @@ class MPCController(Node):
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
-        if self._recovery_state == "RECOVERING":
+        # V2X overtaking steer gain takes priority ALWAYS, even during recovery/cooldown,
+        # so that overtaking corridor calculations are never disrupted by wall recovery mode.
+        # NOTE: We only apply the min_overtaking_steer_gain when LAUNCH MODE is active!
+        if self.USE_OBSTACLE_AVOIDANCE and self._is_launch_mode_active:
+            if self._steer_gain_configurator is not None:
+                current_gain = self._steer_gain_configurator.get_steer_gain(self._mpc.model.wp_id, interpolate=True)
+            else:
+                current_gain = self._mpc_cfg.steering_tire_angle_gain_var
+            
+            overtaking_gain = max(current_gain, self._min_overtaking_steer_gain)
+            self._mpc_cfg.steering_tire_angle_gain_var = overtaking_gain
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / overtaking_gain
+            self._mpc.update_max_steering_rate(scaled_steer_rate_max)
+        elif self._recovery_state == "RECOVERING":
             self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._recovery_steer_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         elif self._recovery_state == "COOLDOWN":
             self._mpc_cfg.steering_tire_angle_gain_var = self._current_post_recovery_steer_gain
             scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._current_post_recovery_steer_gain
-            self._mpc.update_max_steering_rate(scaled_steer_rate_max)
-        elif self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
-            # Override per-waypoint steer gain with fixed overtaking gain while opponent is close
-            self._mpc_cfg.steering_tire_angle_gain_var = self._current_overtaking_steer_gain
-            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / self._current_overtaking_steer_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         elif self._steer_gain_configurator is not None:
             # Normal driving with per-waypoint dynamic gain
@@ -1300,55 +1481,235 @@ class MPCController(Node):
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
 
         # --- Prediction marker color reflects current driving state ---
-        # This works regardless of USE_BUG_ACC:
-        #   RED    = actively recovering from wall (reversing)
-        #   YELLOW = V2X overtaking mode is active (navigating around opponent)
+        # V2X (YELLOW) always takes display priority over recovery (RED).
+        #   RED    = actively recovering from wall (reversing, no V2X)
+        #   YELLOW = V2X overtaking mode is active (always shown when V2X on)
         #   CYAN   = normal forward driving
         if self._dbg_pred_colors:
-            if self._recovery_state == "RECOVERING":
-                self._pred_marker_color = RED
-            elif self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
+            if self.USE_OBSTACLE_AVOIDANCE and self._v2x_avoidance_active:
                 self._pred_marker_color = YELLOW
+            elif self._recovery_state == "RECOVERING":
+                self._pred_marker_color = RED
             else:
                 self._pred_marker_color = CYAN
 
-        # Temporarily suppress obstacle avoidance inside the MPC solver when we are in
-        # recovery, cooldown, or essentially stopped (|v| < 0.5 km/h). In those states
-        # the kart is near a wall and update_path_constraints returns empty/infeasible
-        # segments, which freeze the solver (u=[0,0]). Falling back to pre-computed
-        # static bounds gives the same fast, stable behaviour as use_obstacle_avoidance=False.
-        _suppress_obs_avoidance = (
-            self.USE_OBSTACLE_AVOIDANCE and (
-                self._recovery_state in ("RECOVERING", "COOLDOWN")
-                or abs(v) < 0.5 / 3.6  # < 0.5 km/h  ≈ nearly stopped
-            )
-        )
-        if _suppress_obs_avoidance:
-            self._mpc.use_obstacle_avoidance = False
 
-        with self._stats.time_block("control"):
-            u, max_delta = self._mpc.get_control()
-            # self.get_logger().info(f"u: {u}")
+        # === CORRIDOR CHECK (must come BEFORE get_control()) ===
+        import time
+        t_corridor_start = time.time()
+        # Compute corridor width first. If too narrow, issue a direct ackermann stop
+        # and return immediately — never let the MPC solver run in this case, because
+        # the solver will produce high acceleration that the rest of the loop can't override.
+        min_corridor_width = (self._car.width + 0.2) if (hasattr(self, '_car') and self._car is not None) else (self._cfg.bicycle_model.width + 0.2)
+        curr_width_val = self._compute_corridor_width_at_ego()
+        corridor_is_too_narrow = bool(curr_width_val < min_corridor_width) if self.USE_OBSTACLE_AVOIDANCE else False
 
-        if _suppress_obs_avoidance:
-            self._mpc.use_obstacle_avoidance = True
+        if corridor_is_too_narrow:
+            if self._recovery_state != "NARROW":
+                self._recovery_state = "NARROW"
+                self.get_logger().warn(
+                    f"Corridor width ({curr_width_val:.2f}m) < min width ({min_corridor_width:.2f}m)!"
+                    " Switching to NARROW state — braking in REVERSE gear.",
+                    throttle_duration_sec=1.0
+                )
+                gear_msg = GearCommand()
+                gear_msg.stamp = self.get_clock().now().to_msg()
+                gear_msg.command = GearCommand.REVERSE
+                self._gear_pub.publish(gear_msg)
 
+            if self._dbg_pred_colors:
+                self._pred_marker_color = RED
+
+            # Compute braking acceleration: full brake if moving forward
+            if abs(v) > 0.1:
+                stop_u = np.array([abs(self._recovery_reverse_vel), self._last_u[1]])
+                stop_acc = self._mpc_cfg.a_max
+            else:
+                stop_u = np.array([0.0, self._last_u[1]])
+                stop_acc = 0.0
+
+            stop_acc = self._last_acc + (stop_acc - self._last_acc) * self._mpc_cfg.accel_low_pass_gain
+            self._last_acc = stop_acc
+            self._last_u[0] = stop_u[0]
+            self._car.drive([v, self._last_u[1]])
+            self._publish_control_command(now, stop_u, stop_acc, False)
+            self._sim_logger.log(self._car, stop_u, t)
+            self._sim_logger.plot_animation(t, self._loop, self._current_laps, self._lap_times, is_colliding, stop_u, self._mpc, self._car)
+            return
+        else:
+            if self._recovery_state == "NARROW":
+                self.get_logger().info("Corridor is wide enough. Exiting NARROW state, resuming NORMAL driving.")
+                self._recovery_state = "NORMAL"
+                # Reset MPC state to warm start correctly
+                self._mpc.previous_steering = self._last_u[1]
+                self._mpc.infeasibility_counter = 0
+                self._mpc.current_prediction = None
+                
+                gear_msg = GearCommand()
+                gear_msg.stamp = self.get_clock().now().to_msg()
+                gear_msg.command = GearCommand.DRIVE
+                self._gear_pub.publish(gear_msg)
+
+        # === CALCULATE V_MAX TARGET ===
         if self._mpc_cfg.use_csv_velocity:
-            # We use the interpolated vx_mps from the CSV (stored in wp.v_ref)
             current_wp = self._reference_path.waypoints[self._mpc.model.wp_id]
-            ref_vel_kmph = min(current_wp.v_ref * 3.6, self._mpc_cfg.v_max) # m/s to km/h
-            self._mpc.update_v_max(ref_vel_kmph)
-            # Note: We do NOT call set_v_ref to overwrite the whole path.
-            # This allows the MPC to look ahead at the varying velocities in the CSV!
+            # Both are in m/s
+            target_v_max_mps = min(current_wp.v_ref, self._mpc_cfg.v_max)
         else:
             if self._ref_vel_configulator is not None:
-                ref_vel_mps = self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id)
-                ref_vel_kmph = min(
-                    kmh_to_m_per_sec(ref_vel_mps),
-                    self._mpc_cfg.v_max)
-                self._mpc.update_v_max(ref_vel_kmph)
-                v_ref: List[float] = [ref_vel_kmph] * len(self._reference_path.waypoints)
+                ref_vel_mps = kmh_to_m_per_sec(self._ref_vel_configulator.get_ref_vel(self._mpc.model.wp_id))
+                target_v_max_mps = min(ref_vel_mps, self._mpc_cfg.v_max)
+                v_ref: List[float] = [target_v_max_mps] * len(self._reference_path.waypoints)
                 self._reference_path.set_v_ref(v_ref)
+            else:
+                target_v_max_mps = self._mpc_cfg.v_max
+
+        # === TAILING & LAUNCH MODE LOGIC ===
+        is_overtaking_active = False
+        self._is_launch_mode_active = False
+        in_no_overtake_zone = False
+        self._current_launch_N = None
+        
+        ego_wp_id = self._mpc.model.wp_id if self._mpc is not None else 0
+        for zone in getattr(self, '_no_overtake_zones', []):
+            if len(zone) == 2 and zone[0] <= ego_wp_id <= zone[1]:
+                in_no_overtake_zone = True
+                break
+
+        if self.USE_OBSTACLE_AVOIDANCE and getattr(self, '_v2x_avoidance_active', False) and getattr(self, '_recovery_state', "NORMAL") == "NORMAL":
+            nearest_vid = getattr(self, '_nearest_opponent_vid', None)
+            min_ds = getattr(self, '_nearest_opponent_ds', float('inf'))
+            
+            if nearest_vid is not None:
+                opp_vx, opp_vy = self._v2x_tracker.velocity(nearest_vid)
+                opp_speed_mps = np.hypot(opp_vx, opp_vy)
+                opp_speed_kmph = opp_speed_mps * 3.6
+                
+                # Determine if opponent is FAST or SLOW based on threshold
+                is_fast_oppo = (opp_speed_kmph >= self._v2x_fast_threshold)
+                
+                # Select the appropriate config dictionary
+                if is_fast_oppo and self._fast_opponent_cfg is not None:
+                    oppo_cfg = self._fast_opponent_cfg
+                elif not is_fast_oppo and self._slow_opponent_cfg is not None:
+                    oppo_cfg = self._slow_opponent_cfg
+                else:
+                    oppo_cfg = None
+                    
+                # Extract parameters with defaults
+                active_tailing_speed_gain = float(getattr(oppo_cfg, 'tailing_speed_gain', 0.17)) if oppo_cfg else 0.17
+                active_tailing_speed_min_delta = float(getattr(oppo_cfg, 'tailing_speed_min_delta', 1.2)) if oppo_cfg else 1.2
+                raw_gain_cfg = getattr(oppo_cfg, 'min_overtaking_steer_gain', 1.2) if oppo_cfg else 1.2
+                current_v_kmh = abs(v) * 3.6
+                active_min_overtaking_steer_gain = self._interpolate_gain(raw_gain_cfg, current_v_kmh, default_gain=1.2)
+                self._min_overtaking_steer_gain = active_min_overtaking_steer_gain
+                active_launch_n = int(getattr(oppo_cfg, 'launch_n', 20)) if oppo_cfg else 20
+                active_no_overtake_zones = getattr(oppo_cfg, 'no_overtake_zones', []) if oppo_cfg else []
+                
+                # Check if ego is in the active PREP zone (aggressive tailing, no launching)
+                in_prep_zone = False
+                for zone in active_no_overtake_zones:
+                    if len(zone) >= 2 and zone[0] <= ego_wp_id <= zone[1]:
+                        in_prep_zone = True
+                        break
+                        
+                # Check if ego is in the STRICT NO-OVERTAKE zone (safe tailing, no launching)
+                in_strict_zone = False
+                for zone in self._strict_no_overtake_zones:
+                    if len(zone) >= 2 and zone[0] <= ego_wp_id <= zone[1]:
+                        in_strict_zone = True
+                        break
+
+                self._current_launch_N = active_launch_n
+                
+                # Convert the N-steps into a spatial launch distance
+                dt = 1.0 / self._mpc_cfg.control_rate # 0.025s
+                dynamic_launch_dist = self._current_launch_N * dt * target_v_max_mps
+                
+                # Add hysteresis so it doesn't flutter on/off at the boundary
+                hysteresis_dist = dynamic_launch_dist + 4.0 if getattr(self, '_prev_launch_mode_active', False) else dynamic_launch_dist
+                launch_distance_reached = (min_ds <= hysteresis_dist)
+                
+                if in_strict_zone:
+                    # STRICT Tailing for safe distance keeping
+                    speed_delta = max(self._strict_tailing_min_delta, min_ds * self._strict_tailing_speed_gain) # m/s
+                else:
+                    # PREP / AGGRESSIVE Tailing for gaining up velocity for a pass (config based)
+                    speed_delta = max(active_tailing_speed_min_delta, min_ds * active_tailing_speed_gain) # m/s
+                
+                tail_speed_mps = opp_speed_mps + speed_delta
+                
+                if not in_prep_zone and not in_strict_zone:
+                    if launch_distance_reached:
+                        # Launch mode activate!
+                        self._is_launch_mode_active = True
+                        is_overtaking_active = True
+                        # target_v_max_mps remains self._mpc_cfg.v_max
+                        self.get_logger().info(f"[LAUNCH MODE] {'FAST' if is_fast_oppo else 'SLOW'} Oppo! Launch distance reached ({min_ds:.1f}m)! Full speed & min steer gain: {active_min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
+                    else:
+                        # Tailing outside all zones
+                        if min_ds < self._v2x_tailing_distance:
+                            target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
+                            self.get_logger().info(f"[TAILING] {'FAST' if is_fast_oppo else 'SLOW'} Oppo '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
+                else: # Inside either prep zone or strict zone
+                    # Inside the zone, ONLY trigger emergency pass if opponent is practically crashed.
+                    oppo_crashed_inside = (opp_speed_kmph < 3.5)
+                    
+                    if oppo_crashed_inside:
+                        # Overtake (Emergency Pass) immediately!
+                        self._is_launch_mode_active = True
+                        is_overtaking_active = True
+                        self.get_logger().info(f"[LAUNCH MODE] Zone Override (wp={ego_wp_id})! Opponent crashed/slow. Executing pass immediately. Min steer gain: {active_min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
+                    elif min_ds < self._v2x_tailing_distance:
+                        # Tailing inside a zone
+                        target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
+                        zone_type = "STRICT ZONE" if in_strict_zone else "PREP ZONE"
+                        self.get_logger().info(f"[TAILING] {zone_type} (wp={ego_wp_id}). Tailing '{nearest_vid}' at {min_ds:.1f}m. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
+
+        if getattr(self, '_prev_launch_mode_active', False) and not self._is_launch_mode_active:
+            self.get_logger().info("[LAUNCH MODE] Overtaking maneuver finished. Returning to normal steer gain.", throttle_duration_sec=2.0)
+        self._prev_launch_mode_active = self._is_launch_mode_active
+
+        # === SMOOTH RAMP DOWN OF V_MAX ===
+        # If we instantly drop v_max in the MPC constraints, the solver assumes the kart is ALREADY slow
+        # and plans tight steering. But the physical kart is still flying at high speed, causing a crash!
+        # We must limit the drop rate of v_max to what the physical kart can actually brake.
+        dt = 1.0 / self._mpc_cfg.control_rate
+        # max_decel_step_mps is the maximum drop in speed (m/s) per control cycle.
+        # Use a conservative limit (0.8x of physical a_min) so the PID can keep up.
+        max_decel_step_mps = abs(self._mpc_cfg.a_min) * dt * 0.8
+        
+        # Start the ramp down from the kart's actual physical speed (plus a small margin) 
+        # instead of the previously commanded v_max, so the MPC doesn't assume we are braking
+        # from a speed we never actually reached.
+        current_v_max_mps = self._mpc.input_constraints['umax'][0]
+        actual_speed_mps = abs(v)
+        effective_start_v_max = min(current_v_max_mps, actual_speed_mps + 1.0)
+        
+        if getattr(self, '_is_launch_mode_active', False):
+            new_v_max_mps = self._mpc_cfg.v_max
+        elif target_v_max_mps < effective_start_v_max:
+            new_v_max_mps = max(target_v_max_mps, effective_start_v_max - max_decel_step_mps)
+        else:
+            new_v_max_mps = target_v_max_mps
+            
+        if self.USE_OBSTACLE_AVOIDANCE and getattr(self, '_v2x_avoidance_active', False):
+            # Print detailed tailing speed logs
+            if self._loop % (self._mpc_cfg.control_rate // 2) == 0:
+                print(f"[TAILING-SPEED] actual_v: {actual_speed_mps*3.6:.1f} | current_v_max: {current_v_max_mps*3.6:.1f} | eff_start: {effective_start_v_max*3.6:.1f} | target_v_max: {target_v_max_mps*3.6:.1f} | new_v_max: {new_v_max_mps*3.6:.1f} (km/h)", flush=True)
+            
+        self._mpc.update_v_max(new_v_max_mps)
+
+        # === MPC SOLVER ===
+        with self._stats.time_block("control"):
+            dynamic_obs = self._dynamic_obstacles if (self.USE_OBSTACLE_AVOIDANCE and is_overtaking_active) else []
+            launch_n_arg = getattr(self, '_current_launch_N', None) if is_overtaking_active else None
+            u, max_delta = self._mpc.get_control(dynamic_obstacles=dynamic_obs, launch_N=launch_n_arg)
+
+        # Dynamically retrieve vehicle width from bicycle_model (from config.yaml or parameter updates)
+        # (prevents kart from trying to squeeze through gaps narrower than the configured vehicle width)
+        # NOTE: If we reach this line, corridor_is_too_narrow was False (we already returned above if True).
+        corridor_is_too_narrow = False  # satisfies recovery state-machine reference below
 
         # override by brake command if control is disabled
         if not self._enable_control:
@@ -1366,32 +1727,31 @@ class MPCController(Node):
 
         # Wall Recovery State Machine
         is_recovering = False
-        if self._recovery_enabled and self._enable_control:
+        if self._recovery_enabled and self._enable_control and not corridor_is_too_narrow:
             now_sec = t
 
             if self._recovery_state == "RECOVERING":
                 if (now_sec - self._recovering_start_time) < self._recovery_reverse_time_sec:
                     is_recovering = True
                     # AWSIM: REVERSE gear + positive acc/speed moves the kart backward
-                    u[0] = abs(self._recovery_reverse_vel)  # positive km/h target in REVERSE gear
-                    # Negate steer: reverse opposite to forward path direction to back away from wall
-                    u[1] = -u[1]
+                    u[0] = abs(self._recovery_reverse_vel) / 3.6
+                    
+                    e_y = self._car.spatial_state.e_y
+                    e_psi = self._car.spatial_state.e_psi
+                    
+                    # When reversing, steering right (negative) moves the REAR to the right,
+                    # and points the NOSE to the left.
+                    # If e_y > 0 (kart is left of path), we want the rear to go right. Steer right (negative).
+                    # If e_psi > 0 (nose is pointing left), we want nose to go right. Steer left (positive) in reverse.
+                    steer_cmd = 0.0 * e_y + 0.5 * e_psi
+                    u[1] = np.clip(steer_cmd, -0.314, 0.314)
+                    
+                    self.get_logger().info(f"[RECOVERY DEBUG] Reverse e_y: {e_y:.3f}, e_psi: {e_psi:.3f}, steer: {u[1]:.3f}", throttle_duration_sec=0.5)
+                    
                     # Override steer gain to fixed recovery gain during recovery
                     self._mpc_cfg.steering_tire_angle_gain_var = self._recovery_steer_gain
                 else:
-                    self.get_logger().info("Wall recovery completed! Switching to DRIVE, resuming normal driving...")
-                    # Accumulate steer gain: each full recovery cycle adds the increment.
-                    self._recovery_cycle_count += 1
-                    accumulated = self._post_recovery_steer_gain + \
-                        self._recovery_cycle_count * self._post_recovery_gain_increment
-                    if self._post_recovery_gain_max is not None:
-                        accumulated = min(accumulated, self._post_recovery_gain_max)
-                    self._current_post_recovery_steer_gain = accumulated
-                    self.get_logger().info(
-                        f"[Recovery] Cycle #{self._recovery_cycle_count}: "
-                        f"post_recovery_steer_gain -> {self._current_post_recovery_steer_gain:.2f}")
-                    # Signal that the NEXT overtaking activation should bump the overtaking gain too.
-                    self._post_recovery_overtake_pending = True
+                    self.get_logger().info("Wall recovery completed! Switching to DRIVE, aligning forward...")
                     self._recovery_state = "COOLDOWN"
                     self._cooldown_start_time = now_sec
                     self._stuck_start_time = None
@@ -1407,11 +1767,52 @@ class MPCController(Node):
                     self._gear_pub.publish(gear_msg)
 
             elif self._recovery_state == "COOLDOWN":
-                self._mpc_cfg.steering_tire_angle_gain_var = self._current_post_recovery_steer_gain
-                if self._cooldown_start_time is not None and (now_sec - self._cooldown_start_time) >= self._recovery_cooldown_sec:
+                self._mpc_cfg.steering_tire_angle_gain_var = self._post_recovery_steer_gain
+                
+                # Unconditionally override MPC during COOLDOWN to manually align kart
+                # Crawl forward at 3.6 km/h
+                u[0] = 1.4  
+                
+                e_y = self._car.spatial_state.e_y
+                e_psi = self._car.spatial_state.e_psi
+                
+                # Proportional control for path following in forward gear
+                # If e_y > 0 (left of path), steer right (negative)
+                # If e_psi > 0 (pointing left of path), steer right (negative)
+                steer_cmd = -0.2 * e_y - 0.5 * e_psi
+                u[1] = np.clip(steer_cmd, -0.314, 0.314)
+                
+                self.get_logger().info(f"[RECOVERY DEBUG] Forward Align e_y: {e_y:.3f}, e_psi: {e_psi:.3f}, steer: {u[1]:.3f}", throttle_duration_sec=0.5)
+                
+                # Stuck detection during alignment:
+                if abs(v) < self._recovery_stuck_vel_threshold:
+                    if self._stuck_start_time is None:
+                        self._stuck_start_time = now_sec
+                        self.get_logger().warn("Stuck timer started in COOLDOWN...", throttle_duration_sec=1.0)
+                    elif (now_sec - self._stuck_start_time) >= self._recovery_stuck_time_sec:
+                        self.get_logger().warn("Stuck detected during COOLDOWN! Switching back to RECOVERING...")
+                        self._recovery_state = "RECOVERING"
+                        self._recovering_start_time = now_sec
+                        self._stuck_start_time = None
+                        gear_msg = GearCommand()
+                        gear_msg.stamp = self.get_clock().now().to_msg()
+                        gear_msg.command = GearCommand.REVERSE
+                        self._gear_pub.publish(gear_msg)
+                else:
+                    self._stuck_start_time = None
+
+                # Exit condition: close to centerline and heading aligned
+                is_aligned = abs(e_y) < 1.8 and abs(e_psi) < 0.15
+                is_timeout = self._cooldown_start_time is not None and (now_sec - self._cooldown_start_time) >= 10.0
+                
+                if self._recovery_state == "COOLDOWN" and (is_aligned or is_timeout):
                     self._recovery_state = "NORMAL"
                     self._cooldown_start_time = None
-                    self.get_logger().info("Recovery cooldown done. Back to NORMAL.")
+                    self._set_Q0(self._default_Q0)
+                    if is_aligned:
+                        self.get_logger().info("Recovery alignment done. Kart is on centerline. Back to NORMAL.")
+                    else:
+                        self.get_logger().warn("Recovery alignment timed out. Forcing NORMAL.")
 
             elif self._recovery_state == "NORMAL":
                 curr_wp_id = self._mpc.model.wp_id
@@ -1428,13 +1829,29 @@ class MPCController(Node):
 
                     # u[0] is in km/h; v is in m/s. Stuck = forward commanded (u[0] > 3.6 km/h) but not moving.
                     # Only trigger after kart has actually moved at least once.
-                    if self._has_moved and u[0] > 3.6 and abs(v) < self._recovery_stuck_vel_threshold:
+                    # Suppress when V2X is active (intentional stop for overtaking),
+                    # corridor is too narrow (kart waiting for gap), or control is disabled (manual).
+                    # When MPC crashes (infeasibility), it uses leftover predictions for up to 1.25s (50 frames).
+                    # During this playback, the planned velocity might dip, which would reset the stuck timer!
+                    # If the solver is failing (infeasibility_counter > 0), we must keep the stuck timer running.
+                    # We use target_v_max_mps (intent) rather than u[0] (output) because if stuck against a wall, MPC might brake (u[0]=0).
+                    is_commanding_forward = (target_v_max_mps > 1.0 or self._mpc.infeasibility_counter > 0)
+
+                    # Dynamic stuck time: if we are trying to go fast and are stopped, trigger quickly (0.4s).
+                    # If we intentionally stopped (tailing a stopped opponent), give it a longer grace period (1.5s)
+                    # before deciding we are trapped and need to reverse out.
+                    active_stuck_time_sec = self._recovery_stuck_time_sec if is_commanding_forward else 1.5
+
+                    if self._has_moved and abs(v) < self._recovery_stuck_vel_threshold \
+                            and not corridor_is_too_narrow and self._enable_control \
+                            and (now_sec - self._node_start_time) >= 8.0:
                         if self._stuck_start_time is None:
                             self._stuck_start_time = now_sec
                             self.get_logger().warn("Stuck timer started...", throttle_duration_sec=1.0)
-                        elif (now_sec - self._stuck_start_time) >= self._recovery_stuck_time_sec:
+                        elif (now_sec - self._stuck_start_time) >= active_stuck_time_sec:
                             self.get_logger().warn(f"Stuck detected at wp {curr_wp_id}! Switching to REVERSE gear, recovering for {self._recovery_reverse_time_sec}s...")
                             self._recovery_state = "RECOVERING"
+                            self._set_Q0(self._recovery_cooldown_Q0)
                             self._recovering_start_time = now_sec
                             is_recovering = True
                             u[0] = abs(self._recovery_reverse_vel)  # positive km/h in REVERSE gear
@@ -1451,10 +1868,22 @@ class MPCController(Node):
 
         acc = 0.
         bug_acc_enabled = False
-        if is_recovering:
+        if corridor_is_too_narrow:
+            bug_acc_enabled = False
+            if abs(v) > 0.05:
+                acc = self._mpc_cfg.a_min
+            else:
+                acc = 0.0
+            self._pred_marker_color = RED
+            self.get_logger().warn(
+                f"Corridor width ({curr_width_val:.2f}m) < vehicle width ({min_corridor_width:.2f}m)! Decelerating to full stop.",
+                throttle_duration_sec=1.0
+            )
+        elif is_recovering:
             bug_acc_enabled = False
             # AWSIM: REVERSE gear + positive acc moves backward
-            acc = self._mpc_cfg.a_max  # full forward acc in REVERSE gear = move backward
+            acc = self.KP * (u[0] - abs(v))
+            acc = np.clip(acc, self._mpc_cfg.a_min, self._mpc_cfg.a_max)
         elif self.USE_BUG_ACC:
             def deg2rad(deg):
                 return deg * np.pi / 180.0
@@ -1497,8 +1926,8 @@ class MPCController(Node):
         self._sim_logger.plot_animation(t, self._loop, self._current_laps, self._lap_times, is_colliding, u, self._mpc, self._car)
 
         # 約 0.25 秒ごとに予測結果を表示
-        if (self._mpc.current_prediction is not None) and (self._loop % (self._mpc_cfg.control_rate // 4) == 0):
-            self._publish_mpc_pred_marker(self._mpc.current_prediction[0], self._mpc.current_prediction[1]) # type: ignore
+        if hasattr(self._mpc, 'current_prediction_raw') and (self._loop % (self._mpc_cfg.control_rate // 4) == 0):
+            self._publish_mpc_pred_marker(self._mpc.current_prediction_raw) # type: ignore
             if self.USE_OBSTACLE_AVOIDANCE:
                 if self._dbg_corridor:
                     self._publish_path_corridor()

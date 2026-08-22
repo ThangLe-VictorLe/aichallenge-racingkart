@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 
 .PHONY: autoware-build autoware-vehicle autoware-simulator autoware-request-initialpose autoware-request-control  awsim-request-start awsim-request-reset autoware-driver-zenoh autoware-driver-zenoh-rosbag \
-	simulator dev dev2 dev3 dev4 driver zenoh download rviz2 down down_all ps autoware-attach autoware-bash eval
+	simulator dev dev2 dev3 dev4 driver zenoh download rviz2 down down_all ps autoware-attach autoware-bash eval clean-logs
 
 # Used by docker-compose.yml for build/eval artifact ownership.
 HOST_UID ?= $(shell id -u)
@@ -66,6 +66,8 @@ driver:
 # zenoh (docker compose up -d zenoh)
 zenoh:
 	docker compose up -d zenoh
+
+dev dev2 dev3 dev4 gate1 gate2 gate3: LOG_DIR := /output/dev
 
 dev: SIM_MODE := dev
 dev: simulator autoware-simulator
@@ -153,3 +155,8 @@ download:
 			vehicle/download_submission.sh --output aichallenge/workspace/src/; \
 		fi; \
 	fi
+
+clean-logs:
+	@echo "Cleaning output logs..."
+	rm -rf output/20* output/dev output/latest aichallenge/workspace/log/build_*
+
