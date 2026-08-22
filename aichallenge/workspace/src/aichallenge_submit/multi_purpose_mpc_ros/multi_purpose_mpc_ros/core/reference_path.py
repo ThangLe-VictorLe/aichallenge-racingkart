@@ -934,8 +934,8 @@ class ReferencePath:
                                 lb_sm, ub_sm = 0.0, 0.0
                                 chosen_side = "INFEASIBLE"
                                 
-                            if getattr(obs, 'vid', None) is not None and chosen_side not in ["NONE", "INFEASIBLE"] and "(fallback)" not in chosen_side:
-                                obstacle_choices[obs.vid] = chosen_side
+                            if getattr(obs, 'vid', None) is not None and chosen_side not in ["NONE", "INFEASIBLE"]:
+                                obstacle_choices[obs.vid] = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
                         
                         if not has_printed_corridor_choice and chosen_side != "NONE":
                             print(f"[TAILING-CORRIDOR] ego_wp: {wp_id} | wp_id: {wp_id + n} | Chosen: {chosen_side} | W_left: {W_left:.2f}m, W_right: {W_right:.2f}m", flush=True)
