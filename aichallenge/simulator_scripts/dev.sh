@@ -4,11 +4,11 @@ AWSIM_DIRECTORY=/aichallenge/simulator/AWSIM
 export ROS_DOMAIN_ID=0
 
 # 車両数: 第1引数（既定 1）
-vehicles="${1:-3}"
+vehicles="${1:-1}"
 
 exec $AWSIM_DIRECTORY/AWSIM.x86_64 \
     --start-mode count \
-    --start-count-seconds 5 \
+    --start-count-seconds 1 \
     --vehicles "${vehicles}" \
     --npcs 0 \
     --boosts 5 \

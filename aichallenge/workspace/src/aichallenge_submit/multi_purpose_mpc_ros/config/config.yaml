@@ -137,6 +137,7 @@ v2x_obstacle_avoidance:
     tailing_speed_min_delta: 1.4   # [m/s] minimum relative speed during tailing
     min_overtaking_steer_gain: [[20.0, 1.3], [35.0, 0.8]] # [-] dynamic min steer gain based on current speed
     launch_n: 30                   # For sonner vel boost, Dictates the Launch Distance (small N = wait until very close to launch)
+    overtake_N: 10                 # MPC prediction horizon (N) during active launch mode
     no_overtake_zones: [[150.0, 160.0],[190.0,200.0]] # Block straights here to prevent overtaking fast opponents on straights!
 
   slow_opponent:
@@ -144,6 +145,7 @@ v2x_obstacle_avoidance:
     tailing_speed_min_delta: 2.3
     min_overtaking_steer_gain: [[10.0, 1.75], [25.0, 1.0]] # Dynamic gain: 1.8 at slow speeds, decaying to 1.0 at high speeds
     launch_n: 40                   # For sooner lane change, Dictates the Launch Distance (large N = launch earlier from further away)
+    overtake_N: 14                 # MPC prediction horizon (N) during active launch mode
     no_overtake_zones: [[150.0, 160.0]] # Fewer zones, slow cars are safe to pass anywhere else
 
   # --- Track Strategy Map (Pacenotes) ---

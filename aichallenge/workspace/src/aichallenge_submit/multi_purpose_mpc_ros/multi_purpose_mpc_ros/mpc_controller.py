@@ -398,11 +398,12 @@ class MPCController(Node):
                 cfg_model.width,
                 1.0 / self._cfg.mpc.control_rate) # type: ignore
 
-        def create_mpc(car: BicycleModel) -> Tuple[MPCConfig, MPC]:
+        def create_mpc(car: BicycleModel, override_N=None) -> Tuple[MPCConfig, MPC]:
             cfg_mpc = self._cfg.mpc # type: ignore
+            N_to_use = override_N if override_N is not None else cfg_mpc.N
 
             mpc_cfg = MPCConfig(
-                cfg_mpc.N,
+                N_to_use,
                 sparse.diags(cfg_mpc.Q),
                 sparse.diags(cfg_mpc.R),
                 sparse.diags(cfg_mpc.QN),
@@ -434,7 +435,7 @@ class MPCController(Node):
 
             mpc = MPC(
                 car,
-                mpc_cfg.N,
+                N_to_use,
                 mpc_cfg.Q,
                 mpc_cfg.R,
                 mpc_cfg.QN,
@@ -468,11 +469,13 @@ class MPCController(Node):
         self._map = create_map()
         self._reference_path = create_ref_path(self._map)
         self._car = create_car(self._reference_path)
-        self._mpc_cfg, self._mpc = create_mpc(self._car)
+        self._create_mpc = create_mpc # bind to self for hot-swapping N later
+        self._mpc_cfg, self._mpc = self._create_mpc(self._car)
         compute_speed_profile(self._car, self._mpc_cfg)
-        # Snapshot the baseline steer gain from config so it can be restored
+        # Snapshot the baseline steer gain and default N from config so they can be restored
         # after overtaking or recovery overrides are released.
         self._baseline_steer_gain = self._mpc_cfg.steering_tire_angle_gain_var
+        self._default_mpc_N = int(self._mpc_cfg.N)
 
         if self.USE_OBSTACLE_AVOIDANCE:
             # Pre-build the static path constraints table so it is always available
@@ -678,6 +681,33 @@ class MPCController(Node):
                 return float(gain_config)
             except (TypeError, ValueError):
                 return default_gain
+
+    def _set_mpc_horizon(self, new_N: int):
+        if self._mpc_cfg is not None and int(self._mpc_cfg.N) == int(new_N):
+            return # Already set
+            
+        self.get_logger().info(f"[MPC] Hot-swapping prediction horizon (N): {int(self._mpc_cfg.N)} -> {int(new_N)}")
+        
+        # 1. Save previous steering state to maintain continuity
+        prev_steer = self._mpc.previous_steering if self._mpc is not None else 0.0
+        
+        # 2. Reconstruct MPC with override_N
+        self._mpc_cfg, self._mpc = self._create_mpc(self._car, override_N=new_N)
+        self._mpc.previous_steering = prev_steer
+        
+        # 4. Re-calculate v2x_t_samples which depend on N
+        if hasattr(self, '_v2x_t_samples'):
+            mpc_N = int(new_N)
+            t_horizon = mpc_N / float(self._cfg.mpc.control_rate)
+            self._v2x_t_samples = [
+                k * t_horizon / max(mpc_N - 1, 1) for k in range(0, mpc_N, 4)
+            ]
+        
+        # 5. Pre-build simple path constraints since N changed
+        if self.USE_OBSTACLE_AVOIDANCE:
+            self._reference_path.update_simple_path_constraints(
+                int(self._mpc_cfg.N),
+                self._car.safety_margin)
 
     def _save_config(self) -> None:
         now = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1610,6 +1640,8 @@ class MPCController(Node):
                 active_min_overtaking_steer_gain = self._interpolate_gain(raw_gain_cfg, current_v_kmh, default_gain=1.2)
                 self._min_overtaking_steer_gain = active_min_overtaking_steer_gain
                 active_launch_n = int(getattr(oppo_cfg, 'launch_n', 20)) if oppo_cfg else 20
+                active_overtake_N = int(getattr(oppo_cfg, 'overtake_N', self._default_mpc_N)) if oppo_cfg else self._default_mpc_N
+                self._current_overtake_N = active_overtake_N
                 active_no_overtake_zones = getattr(oppo_cfg, 'no_overtake_zones', []) if oppo_cfg else []
                 
                 # Check if ego is in the active PREP zone (aggressive tailing, no launching)
@@ -1675,6 +1707,14 @@ class MPCController(Node):
         if getattr(self, '_prev_launch_mode_active', False) and not self._is_launch_mode_active:
             self.get_logger().info("[LAUNCH MODE] Overtaking maneuver finished. Returning to normal steer gain.", throttle_duration_sec=2.0)
         self._prev_launch_mode_active = self._is_launch_mode_active
+
+        # === MPC HORIZON HOT-SWAP LOGIC ===
+        if self._is_launch_mode_active:
+            target_N = getattr(self, '_current_overtake_N', self._default_mpc_N)
+            self.get_logger().info(f"Target N is {target_N} (current overtake N: {getattr(self, '_current_overtake_N', None)})", throttle_duration_sec=1.0)
+            self._set_mpc_horizon(target_N)
+        else:
+            self._set_mpc_horizon(self._default_mpc_N)
 
         # === SMOOTH RAMP DOWN OF V_MAX ===
         # If we instantly drop v_max in the MPC constraints, the solver assumes the kart is ALREADY slow
