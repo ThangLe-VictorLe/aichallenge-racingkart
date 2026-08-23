@@ -550,8 +550,7 @@ class MPCController(Node):
             self._strict_tailing_min_delta = float(getattr(v2x_cfg, 'strict_tailing_min_delta', 0.5))
             self._strict_no_overtake_zones = getattr(v2x_cfg, 'strict_no_overtake_zones', [])
             
-            self._corridor_bias = getattr(v2x_cfg, 'corridor_bias', [])
-            
+            self._corridor_bias = [] # Defaults to empty, set dynamically based on opponent
             self._fast_opponent_cfg = getattr(v2x_cfg, 'fast_opponent', None)
             self._slow_opponent_cfg = getattr(v2x_cfg, 'slow_opponent', None)
             
@@ -1605,6 +1604,7 @@ class MPCController(Node):
         self._is_launch_mode_active = False
         in_no_overtake_zone = False
         self._current_launch_N = None
+        self._corridor_bias = []
         
         ego_wp_id = self._mpc.model.wp_id if self._mpc is not None else 0
         for zone in getattr(self, '_no_overtake_zones', []):
@@ -1643,6 +1643,21 @@ class MPCController(Node):
                 active_overtake_N = int(getattr(oppo_cfg, 'overtake_N', self._default_mpc_N)) if oppo_cfg else self._default_mpc_N
                 self._current_overtake_N = active_overtake_N
                 active_no_overtake_zones = getattr(oppo_cfg, 'no_overtake_zones', []) if oppo_cfg else []
+                self._corridor_bias = getattr(oppo_cfg, 'corridor_bias', []) if oppo_cfg else []
+                
+                # LOGGING EXTRACTED PARAMETERS TO CONFIRM WHICH CONFIG IS BEING USED
+                if oppo_cfg is not None:
+                    oppo_type_str = "FAST" if is_fast_oppo else "SLOW"
+                    self.get_logger().info(
+                        f"[{oppo_type_str} OPPO PARAMS] "
+                        f"gain={active_tailing_speed_gain:.2f} | "
+                        f"min_delta={active_tailing_speed_min_delta:.2f} | "
+                        f"launch_n={active_launch_n} | "
+                        f"overtake_N={active_overtake_N} | "
+                        f"no_overtake_zones={active_no_overtake_zones} | "
+                        f"corridor_bias={self._corridor_bias}",
+                        throttle_duration_sec=1.0
+                    )
                 
                 # Check if ego is in the active PREP zone (aggressive tailing, no launching)
                 in_prep_zone = False
@@ -1709,9 +1724,10 @@ class MPCController(Node):
         self._prev_launch_mode_active = self._is_launch_mode_active
 
         # === MPC HORIZON HOT-SWAP LOGIC ===
-        if self._is_launch_mode_active:
+        if self.USE_OBSTACLE_AVOIDANCE and getattr(self, '_v2x_avoidance_active', False):
             target_N = getattr(self, '_current_overtake_N', self._default_mpc_N)
-            self.get_logger().info(f"Target N is {target_N} (current overtake N: {getattr(self, '_current_overtake_N', None)})", throttle_duration_sec=1.0)
+            if self._mpc_cfg is not None and int(self._mpc_cfg.N) != target_N:
+                self.get_logger().info(f"[V2X ACTIVE] Initiating MPC horizon hot-swap to N={target_N} for upcoming maneuver!")
             self._set_mpc_horizon(target_N)
         else:
             self._set_mpc_horizon(self._default_mpc_N)

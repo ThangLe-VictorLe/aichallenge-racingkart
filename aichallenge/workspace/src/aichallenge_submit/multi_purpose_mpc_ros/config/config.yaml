@@ -127,32 +127,28 @@ v2x_obstacle_avoidance:
   # --- Strict Tailing (Safe Distance Keeping) ---
   # These parameters are used globally when inside a strict_no_overtake_zone.
   # The kart will NOT try to creep up and attack.
-  strict_tailing_speed_gain: 0.1
-  strict_tailing_min_delta: 0.5 
-  strict_no_overtake_zones: [[285.0, 335.0]] # Real tailing zones (example)
+  strict_tailing_speed_gain: 0.2
+  strict_tailing_min_delta: 0.6 
+  strict_no_overtake_zones: [[295.0, 335.0]] # Real tailing zones (example)
 
-  fast_opponent:
+  fast_opponent:                  # Work for top tier fast kart
     threshold_kmh: 20.0            # Opponent speeds above this use these settings
     tailing_speed_gain: 0.2       # [-] proportional gain for approach speed
     tailing_speed_min_delta: 1.4   # [m/s] minimum relative speed during tailing
-    min_overtaking_steer_gain: [[20.0, 1.3], [35.0, 0.8]] # [-] dynamic min steer gain based on current speed
+    min_overtaking_steer_gain: [[20.0, 1.6], [35.0, 1.6]] # [-] dynamic min steer gain based on current speed
     launch_n: 30                   # For sonner vel boost, Dictates the Launch Distance (small N = wait until very close to launch)
     overtake_N: 10                 # MPC prediction horizon (N) during active launch mode
-    no_overtake_zones: [[150.0, 160.0],[190.0,200.0]] # Block straights here to prevent overtaking fast opponents on straights!
+    no_overtake_zones: [[150.0,160.0],[190.0,200.0]] # Block straights here to prevent overtaking fast opponents on straights!
+    corridor_bias: [[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"]]
 
-  slow_opponent:
-    tailing_speed_gain: 0.34        
+  slow_opponent:                   # Work for npc, slow karts
+    tailing_speed_gain: 0.34
     tailing_speed_min_delta: 2.3
-    min_overtaking_steer_gain: [[10.0, 1.75], [25.0, 1.0]] # Dynamic gain: 1.8 at slow speeds, decaying to 1.0 at high speeds
+    min_overtaking_steer_gain: [[10.0, 1.6], [20.0, 1.6]] # Dynamic gain: 1.8 at slow speeds, decaying to 1.0 at high speeds
     launch_n: 40                   # For sooner lane change, Dictates the Launch Distance (large N = launch earlier from further away)
     overtake_N: 14                 # MPC prediction horizon (N) during active launch mode
-    no_overtake_zones: [[150.0, 160.0]] # Fewer zones, slow cars are safe to pass anywhere else
-
-  # --- Track Strategy Map (Pacenotes) ---
-  # List of waypoint intervals [start_wp, end_wp, "LEFT" or "RIGHT"] to force a specific passing side.
-  # Use this to prevent getting pinched against the wall in tricky corners where the opponent naturally drifts.
-  # corridor_bias: [[225.0, 240.0, "LEFT"], [300.0, 310.0, "RIGHT"]]
-  corridor_bias: [[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[250.0, 270.0,"LEFT"]]
+    no_overtake_zones: [[150.0,160.0]] # Fewer zones, slow cars are safe to pass anywhere else
+    corridor_bias: [[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[250.0, 270.0,"LEFT"]]
 
 recovery:
   enable: true

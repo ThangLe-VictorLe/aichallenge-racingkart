@@ -10,3 +10,5 @@ Stucture:
 -mpc driving map: aichallenge/workspace/src/aichallenge_submit/multi_purpose_mpc_ros/env/final_ver3
 -traj generator: aichallenge/workspace/src/aichallenge_submit/simple_trajectory_generator/data
 -rviz panel: aichallenge/workspace/src/aichallenge_system/autoware_overlay_rviz_plugin
+
+- whenever add a new variable, remember to initialize them at mpc_controller.py
