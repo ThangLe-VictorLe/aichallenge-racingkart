@@ -197,7 +197,8 @@ class ReferencePath:
 
         # Circular flag
         self.circular = circular
-
+        self.last_W_chosen = 2.0  # Initialize the chosen width property
+        
         # List of waypoint objects
         self.waypoints = self._construct_path(wp_x, wp_y, wp_v)
 
@@ -822,6 +823,79 @@ class ReferencePath:
         border_cells_hor_sm = []
 
         C_prev = 0.0
+
+        # PRE-COMPUTE FUTURE CORRIDOR CHOICE
+        if dynamic_obstacles is not None:
+            obs_by_vid = {}
+            for obs in dynamic_obstacles:
+                if getattr(obs, 'vid', None) is not None:
+                    obs_by_vid.setdefault(obs.vid, []).append(obs)
+            
+            for vid, obs_list in obs_by_vid.items():
+                future_obs = obs_list[-1]
+                wp_idx = getattr(future_obs, 'nearest_wp_id', None)
+                if wp_idx is not None:
+                    f_wp = self.get_waypoint(wp_idx)
+                    dx = future_obs.cx - f_wp.x
+                    dy = future_obs.cy - f_wp.y
+                    d_dist = -dx * np.sin(f_wp.psi) + dy * np.cos(f_wp.psi)
+                    R_eff = future_obs.radius + safety_margin
+                    
+                    ub_sm_f = f_wp.ub - safety_margin
+                    lb_sm_f = f_wp.lb + safety_margin
+                    if ub_sm_f < lb_sm_f:
+                        ub_sm_f = 0.0
+                        lb_sm_f = 0.0
+                    
+                    w_f = R_eff
+                    I_right_f = [lb_sm_f, min(ub_sm_f, d_dist - w_f)]
+                    I_left_f = [max(lb_sm_f, d_dist + w_f), ub_sm_f]
+                    
+                    W_right_f = I_right_f[1] - I_right_f[0]
+                    W_left_f = I_left_f[1] - I_left_f[0]
+                    
+                    valid_right_f = W_right_f >= min_segment_length
+                    valid_left_f = W_left_f >= min_segment_length
+                    
+                    force_side = None
+                    if self.corridor_bias:
+                        curr_wp_id = wp_idx % self.n_waypoints
+                        for bias_start, bias_end, bias_side in self.corridor_bias:
+                            if bias_start <= curr_wp_id <= bias_end:
+                                force_side = bias_side
+                                break
+                    
+                    chosen_side = "NONE"
+                    if force_side is not None:
+                        chosen_side = force_side
+                        self.last_W_chosen = W_left_f if "LEFT" in force_side else W_right_f
+                    else:
+                        if valid_right_f and valid_left_f:
+                            if W_left_f > W_right_f + 0.2:
+                                chosen_side = "LEFT"
+                                self.last_W_chosen = W_left_f
+                            elif W_right_f > W_left_f + 0.2:
+                                chosen_side = "RIGHT"
+                                self.last_W_chosen = W_right_f
+                            else:
+                                chosen_side = "RIGHT" # Default tie-breaker
+                                self.last_W_chosen = W_right_f
+                        elif valid_right_f:
+                            chosen_side = "RIGHT"
+                            self.last_W_chosen = W_right_f
+                        elif valid_left_f:
+                            chosen_side = "LEFT"
+                            self.last_W_chosen = W_left_f
+                        else:
+                            chosen_side = "INFEASIBLE"
+                            self.last_W_chosen = 0.0
+                    
+                    if chosen_side not in ["NONE", "INFEASIBLE"]:
+                        obstacle_choices[vid] = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
+                    
+                    if not has_printed_corridor_choice and chosen_side != "NONE":
+                        print(f"[FUTURE-CORRIDOR] Future wp_id: {wp_idx} | Chosen: {chosen_side} | W_left: {W_left_f:.2f}m, W_right: {W_right_f:.2f}m", flush=True)
+                        has_printed_corridor_choice = True
 
         for n in range(N):
             wp = self.get_waypoint(wp_id + n)

@@ -23,7 +23,7 @@ reference_path:
   update_by_topic: false # When true, 'circle' must be false
   # path from pkg share dir
   # csv_path: ""
-  csv_path: "env/preliminary/optimized_traj_mincurv.csv"
+  csv_path: "env/final_ver3/traj_optimized_traj_mincurv_edited.csv"
   resolution: 0.6
   smoothing_distance: 2
   max_width: 6.0
@@ -64,7 +64,7 @@ mpc:
   ## ---------- 究極 ------------- ##
   ## Lap1: 53s, Lap2: 47s
 
-  v_max: 35.0   # km/h
+  v_max: 36.0   # km/h
   ay_max: 22.0 # m/s^2, maximum lateral acceleration in curves
   Q: [500000.0, 80000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
@@ -109,7 +109,7 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 0.55           # [m] clearance radius around opponent kart
+  vehicle_radius: 1.4           # [m] clearance radius around opponent kart
   v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
   position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
 
@@ -129,7 +129,7 @@ v2x_obstacle_avoidance:
   # The kart will NOT try to creep up and attack.
   strict_tailing_speed_gain: 0.2
   strict_tailing_min_delta: 0.6 
-  strict_no_overtake_zones: [[295.0, 335.0]] # Real tailing zones (example)
+  strict_no_overtake_zones: [[295.0, 340.0]] # Real tailing zones (example)
 
   fast_opponent:                  # Work for top tier fast kart
     threshold_kmh: 20.0            # Opponent speeds above this use these settings
@@ -148,14 +148,14 @@ v2x_obstacle_avoidance:
     launch_n: 40                   # For sooner lane change, Dictates the Launch Distance (large N = launch earlier from further away)
     overtake_N: 14                 # MPC prediction horizon (N) during active launch mode
     no_overtake_zones: [[150.0,160.0]] # Fewer zones, slow cars are safe to pass anywhere else
-    corridor_bias: [[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[250.0, 270.0,"LEFT"]]
+    corridor_bias: [[0.0,55.0, "RIGHT"],[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"],[270.0, 295.0,"RIGHT"]]
 
 recovery:
   enable: true
   stuck_vel_threshold_kmh: 0.2   # [km/h] threshold to consider vehicle stuck
-  stuck_time_sec: 0.5            # [s] seconds stuck before triggering recovery
+  stuck_time_sec: 0.7            # [s] seconds stuck before triggering recovery
   reverse_vel_kmh: -5.0          # [km/h] speed when reversing out
-  reverse_time_sec: 3.0          # [s] duration to reverse
+  reverse_time_sec: 2.0          # [s] duration to reverse
   recovery_steer_gain: 2.0       # fixed steer gain override during recovery
   post_recovery_steer_gain: 2.0  # fixed steer gain override AFTER recovery (during cooldown)
   cooldown_sec: 2.0              # [s] cooldown duration after recovery finishes

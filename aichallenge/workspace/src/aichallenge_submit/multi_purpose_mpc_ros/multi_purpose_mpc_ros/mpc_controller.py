@@ -971,6 +971,7 @@ class MPCController(Node):
                     dists_sq = np.einsum('ij,ij->i', dxy, dxy)
                     nearest_wp = int(np.argmin(dists_sq))
                     ob.s = self._waypoint_s[nearest_wp]
+                    ob.nearest_wp_id = nearest_wp
 
             # Only trigger a map rebuild if obstacle positions changed meaningfully (>0.1m).
             # This prevents continuous corridor redraw on every V2X callback when the
@@ -1649,13 +1650,7 @@ class MPCController(Node):
                 if oppo_cfg is not None:
                     oppo_type_str = "FAST" if is_fast_oppo else "SLOW"
                     self.get_logger().info(
-                        f"[{oppo_type_str} OPPO PARAMS] "
-                        f"gain={active_tailing_speed_gain:.2f} | "
-                        f"min_delta={active_tailing_speed_min_delta:.2f} | "
-                        f"launch_n={active_launch_n} | "
-                        f"overtake_N={active_overtake_N} | "
-                        f"no_overtake_zones={active_no_overtake_zones} | "
-                        f"corridor_bias={self._corridor_bias}",
+                        f"[{oppo_type_str} OPPO PARAMS] Applied.",
                         throttle_duration_sec=1.0
                     )
                 
@@ -1693,7 +1688,9 @@ class MPCController(Node):
                 tail_speed_mps = opp_speed_mps + speed_delta
                 
                 if not in_prep_zone and not in_strict_zone:
-                    if launch_distance_reached:
+                    space_is_wide_enough = getattr(self._reference_path, 'last_W_chosen', 2.0) >= 1.6
+                    
+                    if launch_distance_reached and space_is_wide_enough:
                         # Launch mode activate!
                         self._is_launch_mode_active = True
                         is_overtaking_active = True
@@ -1701,6 +1698,9 @@ class MPCController(Node):
                         self.get_logger().info(f"[LAUNCH MODE] {'FAST' if is_fast_oppo else 'SLOW'} Oppo! Launch distance reached ({min_ds:.1f}m)! Full speed & min steer gain: {active_min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
                     else:
                         # Tailing outside all zones
+                        if launch_distance_reached and not space_is_wide_enough:
+                            self.get_logger().info(f"[WAITING FOR GAP] Gap is too narrow ({getattr(self._reference_path, 'last_W_chosen', 0.0):.2f}m < 1.6m). Holding tailing mode.", throttle_duration_sec=1.0)
+                            
                         if min_ds < self._v2x_tailing_distance:
                             target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
                             self.get_logger().info(f"[TAILING] {'FAST' if is_fast_oppo else 'SLOW'} Oppo '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)

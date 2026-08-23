@@ -29,11 +29,11 @@ import os
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DEFAULT_INPUT  = os.path.join(SCRIPT_DIR, "raceline_awsim_30km_from_garage.csv")
+DEFAULT_INPUT  = os.path.join(SCRIPT_DIR, "raceline_optimized_traj_mincurv.csv")
 DEFAULT_OUTPUT = os.path.join(
     SCRIPT_DIR,
     "../../multi_purpose_mpc_ros/env/final_ver3/"
-    "traj_awsim_30km_from_garage.csv"
+    "traj_optimized_traj_mincurv_edited.csv"
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
