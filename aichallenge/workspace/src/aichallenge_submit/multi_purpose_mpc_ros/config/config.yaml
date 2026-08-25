@@ -133,12 +133,12 @@ v2x_obstacle_avoidance:
 
   fast_opponent:                  # Work for top tier fast kart
     threshold_kmh: 20.0            # Opponent speeds above this use these settings
-    tailing_speed_gain: 0.3       # [-] proportional gain for approach speed
+    tailing_speed_gain: 0.5       # [-] proportional gain for approach speed
     tailing_speed_min_delta: 2.0   # [m/s] minimum relative speed during tailing
     min_overtaking_steer_gain: [[20.0, 1.6], [35.0, 1.6]] # [-] dynamic min steer gain based on current speed
     launch_n: 22                   # For sonner vel boost, Dictates the Launch Distance (small N = wait until very close to launch)
     overtake_N: 10                 # MPC prediction horizon (N) during active launch mode
-    no_overtake_zones: [[150.0,160.0],[190.0,200.0]] # Block straights here to prevent overtaking fast opponents on straights!
+    no_overtake_zones: [[190.0,200.0]] # Block straights here to prevent overtaking fast opponents on straights!
     corridor_bias: [[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"]]
 
   slow_opponent:                   # Work for npc, slow karts

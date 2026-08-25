@@ -898,6 +898,7 @@ class MPCController(Node):
         min_opponent_ds = float('inf')
         nearest_opponent_vid = None
 
+        parsed_vehicles = []
         for idx, v in enumerate(msg.vehicles):
             opp_x = float(v.position.x)
             opp_y = float(v.position.y)
@@ -912,9 +913,38 @@ class MPCController(Node):
             dists_sq = np.einsum('ij,ij->i', dxy, dxy)
             nearest_wp_id = int(np.argmin(dists_sq))
             opp_s = self._waypoint_s[nearest_wp_id]
+            parsed_vehicles.append({
+                'vid': v.vehicle_id, 'x': opp_x, 'y': opp_y, 's': opp_s, 'wp': nearest_wp_id, 'v': v
+            })
+
+        for p_opp in parsed_vehicles:
+            v = p_opp['v']
+            opp_s = p_opp['s']
+            nearest_wp_id = p_opp['wp']
+            opp_x = p_opp['x']
+            opp_y = p_opp['y']
             
             if self._opponent_profiler:
-                self._opponent_profiler.record_opponent_at_wp(opp_x, opp_y, v.vehicle_id, nearest_wp_id)
+                # Check if this opponent is clear (no one within 15m AHEAD of them)
+                # If they are 15m behind someone, they are overtaking, don't learn!
+                is_clear = True
+                
+                # Check ego
+                ds_ego = (ego_s - opp_s) % track_len
+                if 0 < ds_ego < 15.0:
+                    is_clear = False
+                    
+                if is_clear:
+                    for other in parsed_vehicles:
+                        if other['vid'] == v.vehicle_id:
+                            continue
+                        ds_other = (other['s'] - opp_s) % track_len
+                        if 0 < ds_other < 15.0:
+                            is_clear = False
+                            break
+                            
+                if is_clear:
+                    self._opponent_profiler.record_opponent_at_wp(opp_x, opp_y, v.vehicle_id, nearest_wp_id)
                 
             if should_print:
                 vel = self._v2x_tracker.velocity(v.vehicle_id)
@@ -994,6 +1024,7 @@ class MPCController(Node):
             
             # Populate Frenet s for each obstacle to prevent ghost projection bugs in sharp curves
             if self._waypoint_xy.size > 0:
+                printed_strategy_vids = set()
                 for ob in new_dynamic:
                     dxy = self._waypoint_xy - np.array([ob.cx, ob.cy], dtype=np.float64)
                     dists_sq = np.einsum('ij,ij->i', dxy, dxy)
@@ -1001,9 +1032,12 @@ class MPCController(Node):
                     ob.s = self._waypoint_s[nearest_wp]
                     ob.nearest_wp_id = nearest_wp
                     if self._opponent_profiler:
-                        ob.strategy = self._opponent_profiler.get_strategy_for_corner(nearest_wp)
-                        if should_print and not getattr(self._opponent_profiler, '_learning_mode', True):
-                            self.get_logger().info(f"[STRATEGY] Opponent projected at wp {nearest_wp}. Applying '{ob.strategy}' corridor strategy.")
+                        ob.strategy = self._opponent_profiler.get_strategy_for_corner(ob.vid, nearest_wp)
+                        if should_print:
+                            # Only log for the nearest opponent to reduce noise, and only once (since there are multiple prediction points)
+                            if getattr(self, '_nearest_opponent_vid', None) == ob.vid and ob.vid not in printed_strategy_vids:
+                                self.get_logger().info(f"[STRATEGY] Opponent '{ob.vid}' projected at wp {nearest_wp}. Applying '{ob.strategy}' corridor strategy.")
+                                printed_strategy_vids.add(ob.vid)
 
             # Only trigger a map rebuild if obstacle positions changed meaningfully (>0.1m).
             # This prevents continuous corridor redraw on every V2X callback when the
@@ -1510,9 +1544,6 @@ class MPCController(Node):
         self._car.update_states(pose.x, pose.y, pose.theta)
         
         ego_wp_id = self._mpc.model.wp_id if hasattr(self, '_mpc') and self._mpc is not None else 0
-        if hasattr(self, '_opponent_profiler') and self._opponent_profiler:
-            self._opponent_profiler.update_ego_progress(ego_wp_id, len(self._reference_path.waypoints))
-            
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
@@ -1769,7 +1800,7 @@ class MPCController(Node):
         # === START LINE LAUNCH OVERRIDE ===
         # At the start of the race, everyone is packed together and starting from 0 km/h.
         # Tailing logic can cause a deadlock. Force a launch to slam the gas and break out!
-        self._is_start_line_override = (ego_wp_id < 50 and getattr(self._opponent_profiler, '_ego_laps', 0) == 0)
+        self._is_start_line_override = (ego_wp_id < 45 and getattr(self._opponent_profiler, '_ego_laps', 0) == 0)
         if self._is_start_line_override:
             self._is_launch_mode_active = True
             is_overtaking_active = True
@@ -1962,7 +1993,7 @@ class MPCController(Node):
                     # Dynamic stuck time: if we are trying to go fast and are stopped, trigger quickly (0.4s).
                     # If we intentionally stopped (tailing a stopped opponent), give it a longer grace period (1.5s)
                     # before deciding we are trapped and need to reverse out.
-                    active_stuck_time_sec = self._recovery_stuck_time_sec if is_commanding_forward else 1.5
+                    active_stuck_time_sec = self._recovery_stuck_time_sec if is_commanding_forward else 3.0
 
                     if self._has_moved and abs(v) < self._recovery_stuck_vel_threshold \
                             and not corridor_is_too_narrow and self._enable_control \

@@ -876,7 +876,11 @@ class ReferencePath:
                     chosen_side = "NONE"
                     if force_side is not None:
                         chosen_side = force_side
-                        self.last_W_chosen = W_left_f if "LEFT" in force_side else W_right_f
+                        # Artificially guarantee at least 0.5m width so mpc_controller.py's `space_is_wide_enough` 
+                        # triggers LAUNCH MODE instead of falling back to WAITING FOR GAP. 
+                        # We trust the strategy that the gap WILL open up!
+                        actual_w = W_left_f if "LEFT" in force_side else W_right_f
+                        self.last_W_chosen = max(0.5, actual_w)
                     else:
                         if valid_right_f and valid_left_f:
                             if W_left_f > W_right_f + 0.2:
