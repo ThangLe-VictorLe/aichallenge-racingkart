@@ -17,7 +17,7 @@ OBSTACLE = '#2E4053'
 ############
 
 class Obstacle:
-    def __init__(self, cx, cy, radius, s=None, e_y=None, vid=None):
+    def __init__(self, cx, cy, radius, s=None, e_y=None, vid=None, strategy="NORMAL"):
         """
         Constructor for a circular obstacle to be placed on a map.
         :param cx: x coordinate of center of obstacle in world coordinates
@@ -28,9 +28,10 @@ class Obstacle:
         self.cx = cx
         self.cy = cy
         self.radius = radius
-        self.s = s
-        self.vid = vid
-        self.e_y = e_y
+        self.s = s          # optional
+        self.e_y = e_y      # optional
+        self.vid = vid      # optional vehicle ID
+        self.strategy = strategy # optional strategic bias
 
     def show(self, ax):
         """

@@ -25,6 +25,8 @@ class V2XVehicleTracker:
         self._warn = warn_callback if warn_callback is not None else (lambda _msg: None)
         self._samples: Dict[str, Deque[Tuple[float, float, float]]] = {}
         self._velocities: Dict[str, Tuple[float, float]] = {}
+        self._accelerations: Dict[str, Tuple[float, float]] = {}
+        self._headings: Dict[str, float] = {}
         self._active: List[str] = []
 
     def update(self, msg) -> None:
@@ -34,7 +36,7 @@ class V2XVehicleTracker:
             t = _stamp_to_seconds(v.header.stamp)
             x = float(v.position.x)
             y = float(v.position.y)
-            buf = self._samples.setdefault(vid, deque(maxlen=2))
+            buf = self._samples.setdefault(vid, deque(maxlen=5))
 
             # Detect a position jump against the previous sample (if any).
             jumped = False
@@ -51,27 +53,61 @@ class V2XVehicleTracker:
 
             if jumped or len(buf) < 2:
                 self._velocities[vid] = (0.0, 0.0)
+                self._accelerations[vid] = (0.0, 0.0)
+                self._headings[vid] = 0.0
             else:
-                t0, x0, y0 = buf[0]
-                t1, x1, y1 = buf[1]
-                dt = t1 - t0
-                if dt > 0.0:
-                    vx = (x1 - x0) / dt
-                    vy = (y1 - y0) / dt
-                    if math.hypot(vx, vy) > self._v_max_safety:
+                vx_list = []
+                vy_list = []
+                for i in range(1, len(buf)):
+                    dt = buf[i][0] - buf[i-1][0]
+                    if dt > 0.0:
+                        vx_list.append((buf[i][1] - buf[i-1][1]) / dt)
+                        vy_list.append((buf[i][2] - buf[i-1][2]) / dt)
+
+                if not vx_list:
+                    self._velocities[vid] = (0.0, 0.0)
+                    self._accelerations[vid] = (0.0, 0.0)
+                    self._headings[vid] = 0.0
+                else:
+                    vx_avg = sum(vx_list) / len(vx_list)
+                    vy_avg = sum(vy_list) / len(vy_list)
+                    
+                    if math.hypot(vx_avg, vy_avg) > self._v_max_safety:
                         self._velocities[vid] = (0.0, 0.0)
+                        self._accelerations[vid] = (0.0, 0.0)
                         self._warn(
                             f"V2X: velocity for vehicle '{vid}' exceeds "
                             f"{self._v_max_safety} m/s — clamped to zero")
                     else:
-                        self._velocities[vid] = (vx, vy)
-                else:
-                    self._velocities[vid] = (0.0, 0.0)
+                        self._velocities[vid] = (vx_avg, vy_avg)
+                        # Only update heading if we have meaningful movement to avoid noise
+                        if math.hypot(vx_avg, vy_avg) > 0.5:
+                            self._headings[vid] = math.atan2(vy_avg, vx_avg)
+                        elif vid not in self._headings:
+                            self._headings[vid] = 0.0
+                            
+                        # Calculate acceleration if we have at least 2 velocity samples
+                        if len(vx_list) >= 2:
+                            dt_accel = buf[-1][0] - buf[0][0] # Time span of the buffer
+                            if dt_accel > 0:
+                                ax = (vx_list[-1] - vx_list[0]) / dt_accel
+                                ay = (vy_list[-1] - vy_list[0]) / dt_accel
+                                self._accelerations[vid] = (ax, ay)
+                            else:
+                                self._accelerations[vid] = (0.0, 0.0)
+                        else:
+                            self._accelerations[vid] = (0.0, 0.0)
             active.append(vid)
         self._active = active
 
     def velocity(self, vehicle_id: str) -> Tuple[float, float]:
         return self._velocities.get(vehicle_id, (0.0, 0.0))
+
+    def acceleration(self, vehicle_id: str) -> Tuple[float, float]:
+        return self._accelerations.get(vehicle_id, (0.0, 0.0))
+
+    def heading(self, vehicle_id: str) -> float:
+        return self._headings.get(vehicle_id, 0.0)
 
     def predict_positions(
         self, vehicle_id: str, t_samples

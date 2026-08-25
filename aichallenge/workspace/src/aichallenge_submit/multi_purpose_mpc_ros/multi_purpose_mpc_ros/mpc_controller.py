@@ -40,6 +40,7 @@ from multi_purpose_mpc_ros.v2x_vehicle_tracker import (
 # Multi_Purpose_MPC
 from multi_purpose_mpc_ros.core.map import Map, Obstacle
 from multi_purpose_mpc_ros.core.reference_path import ReferencePath
+from multi_purpose_mpc_ros.core.opponent_profiler import OpponentProfiler
 from multi_purpose_mpc_ros.core.spatial_bicycle_models import BicycleModel
 from multi_purpose_mpc_ros.core.MPC import MPC
 from multi_purpose_mpc_ros.core.utils import load_waypoints, kmh_to_m_per_sec, load_ref_path
@@ -504,6 +505,8 @@ class MPCController(Node):
         # Unconditionally initialize _waypoint_xy for prediction marker publishing
         wps = self._reference_path.waypoints
         self._waypoint_xy = np.asarray([(wp.x, wp.y) for wp in wps], dtype=np.float64)
+        
+        self._opponent_profiler = None
 
         # Obstacles
         if self.USE_OBSTACLE_AVOIDANCE:
@@ -519,6 +522,10 @@ class MPCController(Node):
                 position_jump_threshold=float(v2x_cfg.position_jump_threshold),
                 warn_callback=self.get_logger().warn,
             )
+            
+            # Opponent Profiler
+            self._opponent_profiler = OpponentProfiler(wps, logger=self.get_logger())
+            
             self._v2x_vehicle_radius = float(v2x_cfg.vehicle_radius)
             mpc_N = int(self._cfg.mpc.N)  # type: ignore
             t_horizon = mpc_N / float(self._cfg.mpc.control_rate)  # type: ignore
@@ -563,7 +570,7 @@ class MPCController(Node):
             # Minimum time (seconds) the V2X active state must hold before it can flip again.
             # Set to 2.0s to prevent premature deactivation when ego is stopped near opponent.
             self._v2x_min_dwell_sec = 5.0
-            self._v2x_last_state_change_time: Optional[float] = None
+            self._v2x_last_state_change_time = None
 
         # --- Debug Visualization ---
         # Read debug_visualization section from config (all flags default to False).
@@ -858,9 +865,18 @@ class MPCController(Node):
             msg.upper_bounds, msg.lower_bounds, msg.rows, msg.cols)
 
     def _v2x_callback(self, msg: V2XVehiclePositionArray) -> None:
+        if not hasattr(self, '_waypoint_s'):
+            return
+            
         import time
         t_v2x_start = time.time()
         self._v2x_tracker.update(msg)
+        
+        if not hasattr(self, '_last_v2x_print_time'):
+            self._last_v2x_print_time = 0.0
+
+        now_wall = self.get_clock().now().nanoseconds / 1e9
+        should_print = (now_wall - self._last_v2x_print_time) > 1.0
 
         # === PROXIMITY GATE WITH HYSTERESIS ===
         # Only activate the heavy update_path_constraints path when an opponent
@@ -896,6 +912,18 @@ class MPCController(Node):
             dists_sq = np.einsum('ij,ij->i', dxy, dxy)
             nearest_wp_id = int(np.argmin(dists_sq))
             opp_s = self._waypoint_s[nearest_wp_id]
+            
+            if self._opponent_profiler:
+                self._opponent_profiler.record_opponent_at_wp(opp_x, opp_y, v.vehicle_id, nearest_wp_id)
+                
+            if should_print:
+                vel = self._v2x_tracker.velocity(v.vehicle_id)
+                acc = self._v2x_tracker.acceleration(v.vehicle_id)
+                heading = self._v2x_tracker.heading(v.vehicle_id)
+                import math
+                v_mag = math.hypot(vel[0], vel[1])
+                a_mag = math.hypot(acc[0], acc[1])
+                self.get_logger().info(f"[STATE ESTIMATION] {v.vehicle_id} tracked -> Vel: {v_mag:.2f} m/s, Acc: {a_mag:.2f} m/s^2, Heading: {math.degrees(heading):.1f} deg")
             
             # Signed forward distance along raceline; wraps cleanly on circular track
             ds = (opp_s - ego_s) % track_len
@@ -972,6 +1000,10 @@ class MPCController(Node):
                     nearest_wp = int(np.argmin(dists_sq))
                     ob.s = self._waypoint_s[nearest_wp]
                     ob.nearest_wp_id = nearest_wp
+                    if self._opponent_profiler:
+                        ob.strategy = self._opponent_profiler.get_strategy_for_corner(nearest_wp)
+                        if should_print and not getattr(self._opponent_profiler, '_learning_mode', True):
+                            self.get_logger().info(f"[STRATEGY] Opponent projected at wp {nearest_wp}. Applying '{ob.strategy}' corridor strategy.")
 
             # Only trigger a map rebuild if obstacle positions changed meaningfully (>0.1m).
             # This prevents continuous corridor redraw on every V2X callback when the
@@ -989,7 +1021,8 @@ class MPCController(Node):
                 msg, ego_wp_id, ego_s, track_len,
                 activate_threshold, deactivate_threshold)
                 
-        pass
+        if should_print:
+            self._last_v2x_print_time = now_wall
 
     def _filter_obstacles_to_corridor(self, obstacles: List[Obstacle]) -> List[Obstacle]:
         if not obstacles or self._waypoint_xy.size == 0:
@@ -1475,6 +1508,11 @@ class MPCController(Node):
         v = self._odom.twist.twist.linear.x
 
         self._car.update_states(pose.x, pose.y, pose.theta)
+        
+        ego_wp_id = self._mpc.model.wp_id if hasattr(self, '_mpc') and self._mpc is not None else 0
+        if hasattr(self, '_opponent_profiler') and self._opponent_profiler:
+            self._opponent_profiler.update_ego_progress(ego_wp_id, len(self._reference_path.waypoints))
+            
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
@@ -1503,7 +1541,8 @@ class MPCController(Node):
             # Normal driving with per-waypoint dynamic gain
             current_gain = self._steer_gain_configurator.get_steer_gain(self._mpc.model.wp_id, interpolate=True)
             self._mpc_cfg.steering_tire_angle_gain_var = current_gain
-            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / current_gain
+            safe_gain = max(current_gain, 1e-6)
+            scaled_steer_rate_max = self._mpc_cfg.steer_rate_max / safe_gain
             self._mpc.update_max_steering_rate(scaled_steer_rate_max)
         else:
             # Normal driving, fixed gain — always restore baseline so any previous
@@ -1678,6 +1717,9 @@ class MPCController(Node):
                 hysteresis_dist = dynamic_launch_dist + 4.0 if getattr(self, '_prev_launch_mode_active', False) else dynamic_launch_dist
                 launch_distance_reached = (min_ds <= hysteresis_dist)
                 
+                # Dynamic tailing distance: Ensure we have at least 1.2s of braking window before launch
+                dynamic_tailing_dist = max(self._v2x_tailing_distance, dynamic_launch_dist + (target_v_max_mps * 1.2))
+                
                 if in_strict_zone:
                     # STRICT Tailing for safe distance keeping
                     speed_delta = max(self._strict_tailing_min_delta, min_ds * self._strict_tailing_speed_gain) # m/s
@@ -1688,7 +1730,9 @@ class MPCController(Node):
                 tail_speed_mps = opp_speed_mps + speed_delta
                 
                 if not in_prep_zone and not in_strict_zone:
-                    space_is_wide_enough = getattr(self._reference_path, 'last_W_chosen', 2.0) >= 1.6
+                    # last_W_chosen is the remaining driveable width AFTER subtracting ego kart's safety_margin and opponent's radius.
+                    # It just needs to be > 0 for a mathematically feasible path. We use 0.2 for a tiny buffer.
+                    space_is_wide_enough = getattr(self._reference_path, 'last_W_chosen', 2.0) >= 0.2
                     
                     if launch_distance_reached and space_is_wide_enough:
                         # Launch mode activate!
@@ -1699,9 +1743,9 @@ class MPCController(Node):
                     else:
                         # Tailing outside all zones
                         if launch_distance_reached and not space_is_wide_enough:
-                            self.get_logger().info(f"[WAITING FOR GAP] Gap is too narrow ({getattr(self._reference_path, 'last_W_chosen', 0.0):.2f}m < 1.6m). Holding tailing mode.", throttle_duration_sec=1.0)
+                            self.get_logger().info(f"[WAITING FOR GAP] Gap is too narrow ({getattr(self._reference_path, 'last_W_chosen', 0.0):.2f}m < 0.2m). Holding tailing mode.", throttle_duration_sec=1.0)
                             
-                        if min_ds < self._v2x_tailing_distance:
+                        if min_ds < dynamic_tailing_dist:
                             target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
                             self.get_logger().info(f"[TAILING] {'FAST' if is_fast_oppo else 'SLOW'} Oppo '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
                 else: # Inside either prep zone or strict zone
@@ -1713,7 +1757,7 @@ class MPCController(Node):
                         self._is_launch_mode_active = True
                         is_overtaking_active = True
                         self.get_logger().info(f"[LAUNCH MODE] Zone Override (wp={ego_wp_id})! Opponent crashed/slow. Executing pass immediately. Min steer gain: {active_min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
-                    elif min_ds < self._v2x_tailing_distance:
+                    elif min_ds < dynamic_tailing_dist:
                         # Tailing inside a zone
                         target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
                         zone_type = "STRICT ZONE" if in_strict_zone else "PREP ZONE"
@@ -1721,6 +1765,16 @@ class MPCController(Node):
 
         if getattr(self, '_prev_launch_mode_active', False) and not self._is_launch_mode_active:
             self.get_logger().info("[LAUNCH MODE] Overtaking maneuver finished. Returning to normal steer gain.", throttle_duration_sec=2.0)
+            
+        # === START LINE LAUNCH OVERRIDE ===
+        # At the start of the race, everyone is packed together and starting from 0 km/h.
+        # Tailing logic can cause a deadlock. Force a launch to slam the gas and break out!
+        self._is_start_line_override = (ego_wp_id < 50 and getattr(self._opponent_profiler, '_ego_laps', 0) == 0)
+        if self._is_start_line_override:
+            self._is_launch_mode_active = True
+            is_overtaking_active = True
+            self.get_logger().info("[START LINE OVERRIDE] Slamming the gas! Breaking out of the pack.", throttle_duration_sec=1.0)
+
         self._prev_launch_mode_active = self._is_launch_mode_active
 
         # === MPC HORIZON HOT-SWAP LOGIC ===
@@ -1786,6 +1840,12 @@ class MPCController(Node):
             self.get_logger().error("No control signal", throttle_duration_sec=1)
             u = [0.0, 0.0]
             # continue
+            
+        # === MANUAL GAS OVERRIDE (START LINE) ===
+        # The MPC might still plan to brake (u[0] ~ 0) if the gap is tight.
+        # We manually slam the gas to 10 m/s (36 km/h) to physically force the kart forward.
+        if getattr(self, '_is_start_line_override', False):
+            u[0] = max(u[0], 10.0)
 
         # Wall Recovery State Machine
         is_recovering = False

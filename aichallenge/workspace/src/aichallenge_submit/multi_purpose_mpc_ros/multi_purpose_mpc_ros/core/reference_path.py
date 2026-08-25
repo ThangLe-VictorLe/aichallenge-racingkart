@@ -3,6 +3,7 @@ import numpy as np
 import numpy.ma as ma
 import math
 import copy
+import time
 from multi_purpose_mpc_ros.core.map import Map, Obstacle
 from skimage.draw import line
 import matplotlib.pyplot as plt
@@ -808,12 +809,17 @@ class ReferencePath:
         return np.array(upper_bounds), np.array(lower_bounds)
 
     def update_path_constraints(self, wp_id, pose, N, model_length, model_width, safety_margin, dynamic_obstacles=None, launch_N=None):
+        if not hasattr(self, 'start_time'):
+            self.start_time = time.time()
+        current_time = time.time()
+        # Delay printing for the first 7 seconds on the starting grid
+        should_print_corridor = (current_time - self.start_time > 9.0)
+
         """
         Compute upper and lower bounds of the drivable area orthogonal to
         the given waypoint.
         """
         min_segment_length = 0.1
-        has_printed_corridor_choice = False
         obstacle_choices = {} # mapping vid to chosen_side
 
         # container for constraints and border cells
@@ -858,7 +864,9 @@ class ReferencePath:
                     valid_left_f = W_left_f >= min_segment_length
                     
                     force_side = None
-                    if self.corridor_bias:
+                    if hasattr(future_obs, 'strategy') and future_obs.strategy in ["LEFT", "RIGHT"]:
+                        force_side = future_obs.strategy
+                    elif self.corridor_bias:
                         curr_wp_id = wp_idx % self.n_waypoints
                         for bias_start, bias_end, bias_side in self.corridor_bias:
                             if bias_start <= curr_wp_id <= bias_end:
@@ -893,10 +901,8 @@ class ReferencePath:
                     if chosen_side not in ["NONE", "INFEASIBLE"]:
                         obstacle_choices[vid] = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
                     
-                    if not has_printed_corridor_choice and chosen_side != "NONE":
-                        print(f"[FUTURE-CORRIDOR] Future wp_id: {wp_idx} | Chosen: {chosen_side} | W_left: {W_left_f:.2f}m, W_right: {W_right_f:.2f}m", flush=True)
-                        has_printed_corridor_choice = True
-
+                    if chosen_side != "NONE" and should_print_corridor:
+                        print(f"[FUTURE-CORRIDOR] vid: {vid} | Future wp_id: {wp_idx} | Chosen: {chosen_side} | W_left: {W_left_f:.2f}m, W_right: {W_right_f:.2f}m", flush=True)
         for n in range(N):
             wp = self.get_waypoint(wp_id + n)
             
@@ -1011,9 +1017,8 @@ class ReferencePath:
                             if getattr(obs, 'vid', None) is not None and chosen_side not in ["NONE", "INFEASIBLE"]:
                                 obstacle_choices[obs.vid] = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
                         
-                        if not has_printed_corridor_choice and chosen_side != "NONE":
-                            print(f"[TAILING-CORRIDOR] ego_wp: {wp_id} | wp_id: {wp_id + n} | Chosen: {chosen_side} | W_left: {W_left:.2f}m, W_right: {W_right:.2f}m", flush=True)
-                            has_printed_corridor_choice = True
+                        if chosen_side != "NONE" and should_print_corridor:
+                            print(f"[TAILING-CORRIDOR] vid: {getattr(obs, 'vid', 'N/A')} | ego_wp: {wp_id} | wp_id: {wp_id + n} | Chosen: {chosen_side} | W_left: {W_left:.2f}m, W_right: {W_right:.2f}m", flush=True)
             
             if ub_sm < lb_sm:
                 ub_sm = 0.0
