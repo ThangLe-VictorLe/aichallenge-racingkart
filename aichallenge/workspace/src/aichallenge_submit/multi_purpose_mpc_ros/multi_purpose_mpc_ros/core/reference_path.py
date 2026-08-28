@@ -196,9 +196,15 @@ class ReferencePath:
         # Look ahead distance for path averaging
         self.smoothing_distance = smoothing_distance
 
-        # Circular flag
         self.circular = circular
         self.last_W_chosen = 2.0  # Initialize the chosen width property
+        
+        # Memory for obstacle corridor choices to prevent rapid oscillation
+        self.obstacle_choices = {}       # mapping vid to chosen_side
+        self.obstacle_choices_time = {}  # mapping vid to time of first choice
+        self.obstacle_choices_wp = {}    # mapping vid to ego_wp_id when choice was made
+        self.choice_timeout_sec = 5.0    # seconds before resetting choice
+        self.choice_wp_threshold = 25    # waypoints passed before resetting choice
         
         # List of waypoint objects
         self.waypoints = self._construct_path(wp_x, wp_y, wp_v)
@@ -820,7 +826,15 @@ class ReferencePath:
         the given waypoint.
         """
         min_segment_length = 0.1
-        obstacle_choices = {} # mapping vid to chosen_side
+        
+        # Check expired obstacle choices
+        for vid in list(self.obstacle_choices.keys()):
+            elapsed_time = current_time - self.obstacle_choices_time[vid]
+            wp_diff = (wp_id - self.obstacle_choices_wp[vid]) % self.n_waypoints
+            if elapsed_time > self.choice_timeout_sec or (wp_diff > self.choice_wp_threshold and wp_diff < self.n_waypoints - self.choice_wp_threshold):
+                del self.obstacle_choices[vid]
+                del self.obstacle_choices_time[vid]
+                del self.obstacle_choices_wp[vid]
 
         # container for constraints and border cells
         ub_hor = []
@@ -866,12 +880,18 @@ class ReferencePath:
                     force_side = None
                     if hasattr(future_obs, 'strategy') and future_obs.strategy in ["LEFT", "RIGHT"]:
                         force_side = future_obs.strategy
-                    elif self.corridor_bias:
+                        
+                    # Apply track strategy map (corridor bias) if no side is forced yet
+                    if force_side is None and self.corridor_bias:
                         curr_wp_id = wp_idx % self.n_waypoints
                         for bias_start, bias_end, bias_side in self.corridor_bias:
                             if bias_start <= curr_wp_id <= bias_end:
                                 force_side = bias_side
                                 break
+                                
+                    # If no strategy or bias forces it, rely on our memory
+                    if force_side is None and vid in self.obstacle_choices:
+                        force_side = self.obstacle_choices[vid]
                     
                     chosen_side = "NONE"
                     if force_side is not None:
@@ -903,7 +923,11 @@ class ReferencePath:
                             self.last_W_chosen = 0.0
                     
                     if chosen_side not in ["NONE", "INFEASIBLE"]:
-                        obstacle_choices[vid] = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
+                        clean_side = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
+                        if vid not in self.obstacle_choices or self.obstacle_choices[vid] != clean_side:
+                            self.obstacle_choices[vid] = clean_side
+                            self.obstacle_choices_time[vid] = current_time
+                            self.obstacle_choices_wp[vid] = wp_id
                     
                     if chosen_side != "NONE" and should_print_corridor:
                         print(f"[FUTURE-CORRIDOR] vid: {vid} | Future wp_id: {wp_idx} | Chosen: {chosen_side} | W_left: {W_left_f:.2f}m, W_right: {W_right_f:.2f}m", flush=True)
@@ -956,7 +980,7 @@ class ReferencePath:
                         force_side = None
                         
                         if getattr(obs, 'vid', None) is not None:
-                            force_side = obstacle_choices.get(obs.vid)
+                            force_side = self.obstacle_choices.get(obs.vid)
                         
                         # Apply track strategy map (corridor bias) if no side is forced yet
                         if force_side is None and self.corridor_bias:
@@ -1019,7 +1043,11 @@ class ReferencePath:
                                 chosen_side = "INFEASIBLE"
                                 
                             if getattr(obs, 'vid', None) is not None and chosen_side not in ["NONE", "INFEASIBLE"]:
-                                obstacle_choices[obs.vid] = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
+                                clean_side = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
+                                if obs.vid not in self.obstacle_choices or self.obstacle_choices[obs.vid] != clean_side:
+                                    self.obstacle_choices[obs.vid] = clean_side
+                                    self.obstacle_choices_time[obs.vid] = current_time
+                                    self.obstacle_choices_wp[obs.vid] = wp_id
                         
                         if chosen_side != "NONE" and should_print_corridor:
                             print(f"[TAILING-CORRIDOR] vid: {getattr(obs, 'vid', 'N/A')} | ego_wp: {wp_id} | wp_id: {wp_id + n} | Chosen: {chosen_side} | W_left: {W_left:.2f}m, W_right: {W_right:.2f}m", flush=True)

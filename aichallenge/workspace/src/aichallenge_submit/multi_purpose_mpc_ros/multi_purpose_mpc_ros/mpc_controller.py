@@ -1544,6 +1544,21 @@ class MPCController(Node):
         self._car.update_states(pose.x, pose.y, pose.theta)
         
         ego_wp_id = self._mpc.model.wp_id if hasattr(self, '_mpc') and self._mpc is not None else 0
+        
+        if not hasattr(self, '_ego_laps'):
+            self._ego_laps = 0
+            self._last_ego_wp = ego_wp_id
+            
+        total_wps = len(self._reference_path.waypoints)
+        if self._last_ego_wp > total_wps * 0.8 and ego_wp_id < total_wps * 0.2:
+            self._ego_laps += 1
+            self.get_logger().info(f"[RACE] Lap {self._ego_laps} completed!")
+        self._last_ego_wp = ego_wp_id
+        
+        # === START LINE LAUNCH OVERRIDE ===
+        # At the start of the race, everyone is packed together and starting from 0 km/h.
+        # Tailing logic can cause a deadlock. Force a launch to slam the gas and break out!
+        self._is_start_line_override = False # Temporarily disabled: (self._ego_laps == 0 and ego_wp_id < 40)
         # print(f"car x: {self._car.temporal_state.x}, y: {self._car.temporal_state.y}, psi: {self._car.temporal_state.psi}")
         # print(f"mpc x: {self._mpc.model.temporal_state.x}, y: {self._mpc.model.temporal_state.y}, psi: {self._mpc.model.temporal_state.psi}")
 
@@ -1606,7 +1621,7 @@ class MPCController(Node):
         # Compute corridor width first. If too narrow, issue a direct ackermann stop
         # and return immediately — never let the MPC solver run in this case, because
         # the solver will produce high acceleration that the rest of the loop can't override.
-        min_corridor_width = (self._car.width + 0.2) if (hasattr(self, '_car') and self._car is not None) else (self._cfg.bicycle_model.width + 0.2)
+        min_corridor_width = 0.15 # Just 15cm of wiggle room for the center of the kart
         curr_width_val = self._compute_corridor_width_at_ego()
         corridor_is_too_narrow = bool(curr_width_val < min_corridor_width) if self.USE_OBSTACLE_AVOIDANCE else False
 
@@ -1676,6 +1691,7 @@ class MPCController(Node):
         in_no_overtake_zone = False
         self._current_launch_N = None
         self._corridor_bias = []
+        lateral_offset = 0.0
         
         ego_wp_id = self._mpc.model.wp_id if self._mpc is not None else 0
         for zone in getattr(self, '_no_overtake_zones', []):
@@ -1706,6 +1722,9 @@ class MPCController(Node):
                 # Extract parameters with defaults
                 active_tailing_speed_gain = float(getattr(oppo_cfg, 'tailing_speed_gain', 0.17)) if oppo_cfg else 0.17
                 active_tailing_speed_min_delta = float(getattr(oppo_cfg, 'tailing_speed_min_delta', 1.2)) if oppo_cfg else 1.2
+                active_tailing_speed_safe_delta = float(getattr(oppo_cfg, 'tailing_speed_safe_delta', 0.2)) if oppo_cfg else 0.2
+                active_tailing_lateral_offset = float(getattr(oppo_cfg, 'tailing_lateral_offset', 0.7)) if oppo_cfg else 0.7
+                active_launch_safe_width = float(getattr(oppo_cfg, 'launch_safe_width', 0.2)) if oppo_cfg else 0.2
                 raw_gain_cfg = getattr(oppo_cfg, 'min_overtaking_steer_gain', 1.2) if oppo_cfg else 1.2
                 current_v_kmh = abs(v) * 3.6
                 active_min_overtaking_steer_gain = self._interpolate_gain(raw_gain_cfg, current_v_kmh, default_gain=1.2)
@@ -1762,8 +1781,8 @@ class MPCController(Node):
                 
                 if not in_prep_zone and not in_strict_zone:
                     # last_W_chosen is the remaining driveable width AFTER subtracting ego kart's safety_margin and opponent's radius.
-                    # It just needs to be > 0 for a mathematically feasible path. We use 0.2 for a tiny buffer.
-                    space_is_wide_enough = getattr(self._reference_path, 'last_W_chosen', 2.0) >= 0.2
+                    # It just needs to be > launch_safe_width for a mathematically feasible path.
+                    space_is_wide_enough = getattr(self._reference_path, 'last_W_chosen', 2.0) >= active_launch_safe_width
                     
                     if launch_distance_reached and space_is_wide_enough:
                         # Launch mode activate!
@@ -1773,8 +1792,20 @@ class MPCController(Node):
                         self.get_logger().info(f"[LAUNCH MODE] {'FAST' if is_fast_oppo else 'SLOW'} Oppo! Launch distance reached ({min_ds:.1f}m)! Full speed & min steer gain: {active_min_overtaking_steer_gain:.1f}", throttle_duration_sec=1.0)
                     else:
                         # Tailing outside all zones
-                        if launch_distance_reached and not space_is_wide_enough:
-                            self.get_logger().info(f"[WAITING FOR GAP] Gap is too narrow ({getattr(self._reference_path, 'last_W_chosen', 0.0):.2f}m < 0.2m). Holding tailing mode.", throttle_duration_sec=1.0)
+                        safe_wait_distance = dynamic_launch_dist + 10.0
+                        
+                        if min_ds <= safe_wait_distance and not space_is_wide_enough:
+                            self.get_logger().info(f"[WAITING FOR GAP] Gap is too narrow ({getattr(self._reference_path, 'last_W_chosen', 0.0):.2f}m < {active_launch_safe_width:.2f}m). Pre-positioning and using safe delta.", throttle_duration_sec=1.0)
+                            tail_speed_mps = opp_speed_mps + active_tailing_speed_safe_delta
+                            
+                            chosen_side = getattr(self._reference_path, 'obstacle_choices', {}).get(nearest_vid, "NONE")
+                            if chosen_side in ["LEFT", "LEFT (smooth)", "LEFT (only valid)"]:
+                                lateral_offset = active_tailing_lateral_offset
+                            elif chosen_side in ["RIGHT", "RIGHT (smooth)", "RIGHT (only valid)"]:
+                                lateral_offset = -active_tailing_lateral_offset
+                                
+                            if self._loop % (self._mpc_cfg.control_rate // 2) == 0:
+                                print(f"[WAITING FOR GAP DEBUG] dist: {min_ds:.1f}m <= safe_wait: {safe_wait_distance:.1f}m | side: {chosen_side} | offset: {lateral_offset:.2f}m | tail_v: {tail_speed_mps*3.6:.1f}km/h", flush=True)
                             
                         if min_ds < dynamic_tailing_dist:
                             target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
@@ -1797,11 +1828,7 @@ class MPCController(Node):
         if getattr(self, '_prev_launch_mode_active', False) and not self._is_launch_mode_active:
             self.get_logger().info("[LAUNCH MODE] Overtaking maneuver finished. Returning to normal steer gain.", throttle_duration_sec=2.0)
             
-        # === START LINE LAUNCH OVERRIDE ===
-        # At the start of the race, everyone is packed together and starting from 0 km/h.
-        # Tailing logic can cause a deadlock. Force a launch to slam the gas and break out!
-        self._is_start_line_override = (ego_wp_id < 45 and getattr(self._opponent_profiler, '_ego_laps', 0) == 0)
-        if self._is_start_line_override:
+        if getattr(self, '_is_start_line_override', False):
             self._is_launch_mode_active = True
             is_overtaking_active = True
             self.get_logger().info("[START LINE OVERRIDE] Slamming the gas! Breaking out of the pack.", throttle_duration_sec=1.0)
@@ -1851,7 +1878,7 @@ class MPCController(Node):
         with self._stats.time_block("control"):
             dynamic_obs = self._dynamic_obstacles if (self.USE_OBSTACLE_AVOIDANCE and is_overtaking_active) else []
             launch_n_arg = getattr(self, '_current_launch_N', None) if is_overtaking_active else None
-            u, max_delta = self._mpc.get_control(dynamic_obstacles=dynamic_obs, launch_N=launch_n_arg)
+            u, max_delta = self._mpc.get_control(dynamic_obstacles=dynamic_obs, launch_N=launch_n_arg, lateral_offset=lateral_offset)
 
         # Dynamically retrieve vehicle width from bicycle_model (from config.yaml or parameter updates)
         # (prevents kart from trying to squeeze through gaps narrower than the configured vehicle width)
@@ -1873,7 +1900,7 @@ class MPCController(Node):
             # continue
             
         # === MANUAL GAS OVERRIDE (START LINE) ===
-        # The MPC might still plan to brake (u[0] ~ 0) if the gap is tight.
+        # The MPC might still plan to brake (u[0] ~ 0) if the gap is tight or due to tailing constraints.
         # We manually slam the gas to 10 m/s (36 km/h) to physically force the kart forward.
         if getattr(self, '_is_start_line_override', False):
             u[0] = max(u[0], 10.0)

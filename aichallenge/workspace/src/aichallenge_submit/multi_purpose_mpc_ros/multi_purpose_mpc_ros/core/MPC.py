@@ -128,7 +128,7 @@ class MPC:
         self.max_steering_rate = max_steering_rate
 
 
-    def _init_problem(self, N, umin, umax, safety_margin, dynamic_obstacles=None, launch_N=None):
+    def _init_problem(self, N, umin, umax, safety_margin, dynamic_obstacles=None, launch_N=None, lateral_offset=0.0):
         import time
         t_start = time.time()
         
@@ -218,7 +218,10 @@ class MPC:
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
         xmin_dyn[self.nx::self.nx] = lb
         xmax_dyn[self.nx::self.nx] = ub
-        xr[self.nx::self.nx] = (lb + ub) / 2
+        
+        target_ey = ((lb + ub) / 2.0) + lateral_offset
+        target_ey = np.clip(target_ey, lb, ub)
+        xr[self.nx::self.nx] = target_ey
 
         # Get equality matrix
         A_blocks = [A_arr[n] for n in range(N)]
@@ -277,7 +280,7 @@ class MPC:
         t_setup_end = time.time()
         return P, q, A_full, l, u
 
-    def get_control(self, dynamic_obstacles=None, launch_N=None) -> Tuple[np.ndarray, float]:
+    def get_control(self, dynamic_obstacles=None, launch_N=None, lateral_offset=0.0) -> Tuple[np.ndarray, float]:
         """
         Get control signal given the current position of the car.
         """
@@ -298,7 +301,7 @@ class MPC:
         t_t2s_end = time.time()
 
         t_init_start = time.time()
-        P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], self.model.safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N)
+        P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], self.model.safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, lateral_offset=lateral_offset)
         t_init_end = time.time()
 
 
@@ -314,7 +317,7 @@ class MPC:
             if not np.all(use_control_signals):
                 for i in range(1, 6):
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
-                    self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], relaxed_safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N)
+                    self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], relaxed_safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, lateral_offset=lateral_offset)
                     dec = self.optimizer.solve()
                     control_signals = np.array(dec.x[-N*nu:])
                     use_control_signals = control_signals[1::2]

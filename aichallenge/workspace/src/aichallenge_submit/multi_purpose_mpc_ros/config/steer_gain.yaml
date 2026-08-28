@@ -18,19 +18,19 @@ steer_gain_configurator:
     gain: 1.0
     wp_id: 25
   s6:
-    gain: 0.7
+    gain: 1.0
     wp_id: 30
   s7:
-    gain: 0.0
+    gain: 1.0
     wp_id: 35
   s8:
-    gain: 0.0
+    gain: 1.0
     wp_id: 40
   s9:
-    gain: 0.5
+    gain: 1.0
     wp_id: 45
   s10:
-    gain: 0.0
+    gain: 1.0
     wp_id: 50
   s11:
     gain: 1.6

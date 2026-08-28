@@ -20,7 +20,7 @@
     <arg name="launch_vehicle_interface" value="$(var launch_vehicle_interface)"/>
   </include>
   <node pkg="editor_tool_server" exec="interactive_server" output="screen" name="editor_tool_server">
-    <param name="csv_file_path" value="/aichallenge/workspace/src/aichallenge_submit/aichallenge-trajectory-editor/csv/raceline_awsim_30km_from_garage"/>
+    <param name="csv_file_path" value="/aichallenge/workspace/src/aichallenge_submit/aichallenge-trajectory-editor/csv/raceline_optimized_traj_shortest.csv"/>
     <param name="publish_on_initialize" value="true"/>
     <param name="wait_seconds" value="5.0"/>
     <param name="grad_min_speed" value="0.0"/>

@@ -36,7 +36,7 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.55   # artificially squeezed to force strict tracking
+  width: 1.35   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: false
@@ -109,7 +109,7 @@ mpc:
   # QN: [1000000.0, 1000.0, 10000.0]
 
 v2x_obstacle_avoidance:
-  vehicle_radius: 0.6           # [m] clearance radius around opponent kart
+  vehicle_radius: 0.73           # [m] clearance radius around opponent kart
   v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
   position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
 
@@ -134,22 +134,30 @@ v2x_obstacle_avoidance:
   fast_opponent:                  # Work for top tier fast kart
     threshold_kmh: 20.0            # Opponent speeds above this use these settings
     tailing_speed_gain: 0.5       # [-] proportional gain for approach speed
-    tailing_speed_min_delta: 2.0   # [m/s] minimum relative speed during tailing
+    tailing_speed_min_delta: 2.0   # [m/s] minimum relative speed during tailing (catching up)
+    tailing_speed_safe_delta: 0.2  # [m/s] safe delta when waiting closely for a gap
+    tailing_lateral_offset: 0.7    # [m] lateral offset to explicitly slide to the chosen side while waiting
+    launch_safe_width: 0.2         # [m] required corridor width to trigger launch
     min_overtaking_steer_gain: [[20.0, 1.6], [35.0, 1.6]] # [-] dynamic min steer gain based on current speed
     launch_n: 22                   # For sonner vel boost, Dictates the Launch Distance (small N = wait until very close to launch)
     overtake_N: 10                 # MPC prediction horizon (N) during active launch mode
-    no_overtake_zones: [[190.0,200.0]] # Block straights here to prevent overtaking fast opponents on straights!
+    no_overtake_zones: [] # Block straights here to prevent overtaking fast opponents on straights!
+    #[190.0,200.0]
     corridor_bias: [[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"]]
 
   slow_opponent:                   # Work for npc, slow karts
     tailing_speed_gain: 0.5
     tailing_speed_min_delta: 0.5
-    min_overtaking_steer_gain: [[10.0, 1.8], [25.0, 1.5]] # Dynamic gain: 1.8 at slow speeds, decaying to 1.0 at high speeds
+    tailing_speed_safe_delta: 0.2  # [m/s] safe delta when waiting closely for a gap
+    tailing_lateral_offset: 0.7    # [m] lateral offset to explicitly slide to the chosen side while waiting
+    launch_safe_width: 0.2         # [m] required corridor width to trigger launch
+    min_overtaking_steer_gain: [[10.0, 1.8], [25.0, 1.4]] # Dynamic gain: 1.8 at slow speeds, decaying to 1.0 at high speeds
     launch_n: 30                   # For sooner lane change, Dictates the Launch Distance (large N = launch earlier from further away)
     overtake_N: 14                 # MPC prediction horizon (N) during active launch mode
-    no_overtake_zones: [[150.0,160.0]] # Fewer zones, slow cars are safe to pass anywhere else
+    no_overtake_zones: [] # Fewer zones, slow cars are safe to pass anywhere else
+    #[150.0,160.0]
     corridor_bias: [[0.0,55.0, "RIGHT"],[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"],[270.0, 295.0,"RIGHT"]]
-
+    #
 recovery:
   enable: true
   stuck_vel_threshold_kmh: 0.2   # [km/h] threshold to consider vehicle stuck

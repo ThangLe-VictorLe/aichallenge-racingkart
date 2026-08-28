@@ -1,0 +1,1 @@
+Reviewing reference_path.py for obstacle_choices memory
