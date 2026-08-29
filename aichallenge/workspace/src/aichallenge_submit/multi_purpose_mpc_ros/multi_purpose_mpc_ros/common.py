@@ -33,3 +33,14 @@ def convert_to_namedtuple(
 def file_exists(file_path: str) -> None:
     if not os.path.exists(file_path):
         raise FileNotFoundError("File not found: " + file_path)
+
+def read_config_file(file_path: str) -> str:
+    if file_path.endswith('.enc'):
+        import base64
+        import zlib
+        with open(file_path, "rb") as f:
+            content_bytes = f.read()
+        return zlib.decompress(base64.b85decode(content_bytes)).decode('utf-8')
+    else:
+        with open(file_path, "r") as f:
+            return f.read()

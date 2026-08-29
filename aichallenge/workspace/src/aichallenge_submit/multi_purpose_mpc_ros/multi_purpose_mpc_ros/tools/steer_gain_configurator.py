@@ -20,6 +20,7 @@ from std_msgs.msg import ColorRGBA
 
 # Multi_Purpose_MPC
 from multi_purpose_mpc_ros.tools.reference_path_generator import ReferencePathGenerator
+from multi_purpose_mpc_ros.common import read_config_file
 
 RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
 YELLOW = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
@@ -45,9 +46,11 @@ class SteerGainConfigurator:
 
         # Load raw ref_vel config to track parameter updates
         ref_vel_path = os.path.join(os.path.dirname(self._steer_gain_config_path), "ref_vel.yaml")
+        if not os.path.exists(ref_vel_path):
+            ref_vel_path = os.path.join(os.path.dirname(self._steer_gain_config_path), "ref_vel.enc")
         try:
-            with open(ref_vel_path, "r") as f:
-                self._ref_vel_cfg = yaml.safe_load(f).get("ref_vel_configulator", {})
+            config_content = read_config_file(ref_vel_path)
+            self._ref_vel_cfg = yaml.safe_load(config_content).get("ref_vel_configulator", {})
         except Exception:
             self._ref_vel_cfg = {}
 
@@ -67,17 +70,19 @@ class SteerGainConfigurator:
 
     @classmethod
     def _load_config(cls, config_path: str) -> Dict:
-        with open(config_path, "r") as f:
-            cfg: Dict = yaml.safe_load(f)
+        config_content = read_config_file(config_path)
+        cfg: Dict = yaml.safe_load(config_content)
         return cfg["steer_gain_configurator"]
 
     def _load_ref_vel_map(self) -> Dict[int, float]:
         ref_vel_path = os.path.join(os.path.dirname(self._steer_gain_config_path), "ref_vel.yaml")
         if not os.path.exists(ref_vel_path):
-            return {}
+            ref_vel_path = os.path.join(os.path.dirname(self._steer_gain_config_path), "ref_vel.enc")
+            if not os.path.exists(ref_vel_path):
+                return {}
         try:
-            with open(ref_vel_path, "r") as f:
-                cfg = yaml.safe_load(f)
+            config_content = read_config_file(ref_vel_path)
+            cfg = yaml.safe_load(config_content)
             ref_cfg = cfg.get("ref_vel_configulator", {})
             res = {}
             for k, v in ref_cfg.items():

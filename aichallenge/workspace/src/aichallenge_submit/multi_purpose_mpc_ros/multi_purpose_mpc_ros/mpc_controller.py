@@ -169,37 +169,39 @@ class MPCController(Node):
             self.get_logger().warn("USE_OBSTACLE_AVOIDANCE is enabled!")
             self.get_logger().warn("------------------------------------")
 
-    def _load_config(self) -> NamedTuple:
+    def _read_config_file(self, file_path: str) -> str:
+        if file_path.endswith('.enc'):
+            import base64
+            import zlib
+            with open(file_path, "rb") as f:
+                content_bytes = f.read()
+            return zlib.decompress(base64.b85decode(content_bytes)).decode('utf-8')
+        else:
+            with open(file_path, "r") as f:
+                return f.read()
 
-        # logging content
-        with open(self._config_path, "r") as f:
-            config_content = f.read()
-            self.get_logger().info(
-                "\n" +
-                "----- config.yaml -----\n"+
-                config_content + "\n" +
-                "-----------------------")
+    def _load_config(self) -> NamedTuple:
+        config_content = self._read_config_file(self._config_path)
+        if not self._config_path.endswith('.enc'):
+            self.get_logger().info("\n----- config.yaml -----\n" + config_content + "\n-----------------------")
+        else:
+            self.get_logger().info("\n----- config (encrypted) loaded -----")
 
         if self._ref_vel_config_path is not None:
-            with open(self._ref_vel_config_path, "r") as f:
-                ref_vel_config_content = f.read()
-                self.get_logger().info(
-                    "\n" +
-                    "----- ref_vel.yaml -----\n"+
-                    ref_vel_config_content + "\n" +
-                    "-----------------------")
+            ref_vel_config_content = self._read_config_file(self._ref_vel_config_path)
+            if not self._ref_vel_config_path.endswith('.enc'):
+                self.get_logger().info("\n----- ref_vel.yaml -----\n" + ref_vel_config_content + "\n-----------------------")
+            else:
+                self.get_logger().info("\n----- ref_vel (encrypted) loaded -----")
 
         if self._steer_gain_config_path is not None:
-            with open(self._steer_gain_config_path, "r") as f:
-                steer_gain_config_content = f.read()
-                self.get_logger().info(
-                    "\n" +
-                    "----- steer_gain.yaml -----\n"+
-                    steer_gain_config_content + "\n" +
-                    "-----------------------")
+            steer_gain_config_content = self._read_config_file(self._steer_gain_config_path)
+            if not self._steer_gain_config_path.endswith('.enc'):
+                self.get_logger().info("\n----- steer_gain.yaml -----\n" + steer_gain_config_content + "\n-----------------------")
+            else:
+                self.get_logger().info("\n----- steer_gain (encrypted) loaded -----")
 
-        with open(self._config_path, "r") as f:
-            cfg: NamedTuple = convert_to_namedtuple(yaml.safe_load(f)) # type: ignore
+        cfg: NamedTuple = convert_to_namedtuple(yaml.safe_load(config_content)) # type: ignore
 
         # Check if the files exist
         mandatory_files = [cfg.map.yaml_path, cfg.waypoints.csv_path] # type: ignore
@@ -944,7 +946,8 @@ class MPCController(Node):
                             break
                             
                 if is_clear:
-                    self._opponent_profiler.record_opponent_at_wp(opp_x, opp_y, v.vehicle_id, nearest_wp_id)
+                    heading = self._v2x_tracker.heading(v.vehicle_id)
+                    self._opponent_profiler.record_opponent_at_wp(opp_x, opp_y, v.vehicle_id, nearest_wp_id, opp_yaw=heading)
                 
             if should_print:
                 vel = self._v2x_tracker.velocity(v.vehicle_id)
@@ -1779,6 +1782,8 @@ class MPCController(Node):
                 
                 tail_speed_mps = opp_speed_mps + speed_delta
                 
+                is_actively_tailing = False
+
                 if not in_prep_zone and not in_strict_zone:
                     # last_W_chosen is the remaining driveable width AFTER subtracting ego kart's safety_margin and opponent's radius.
                     # It just needs to be > launch_safe_width for a mathematically feasible path.
@@ -1797,18 +1802,13 @@ class MPCController(Node):
                         if min_ds <= safe_wait_distance and not space_is_wide_enough:
                             self.get_logger().info(f"[WAITING FOR GAP] Gap is too narrow ({getattr(self._reference_path, 'last_W_chosen', 0.0):.2f}m < {active_launch_safe_width:.2f}m). Pre-positioning and using safe delta.", throttle_duration_sec=1.0)
                             tail_speed_mps = opp_speed_mps + active_tailing_speed_safe_delta
-                            
-                            chosen_side = getattr(self._reference_path, 'obstacle_choices', {}).get(nearest_vid, "NONE")
-                            if chosen_side in ["LEFT", "LEFT (smooth)", "LEFT (only valid)"]:
-                                lateral_offset = active_tailing_lateral_offset
-                            elif chosen_side in ["RIGHT", "RIGHT (smooth)", "RIGHT (only valid)"]:
-                                lateral_offset = -active_tailing_lateral_offset
                                 
                             if self._loop % (self._mpc_cfg.control_rate // 2) == 0:
-                                print(f"[WAITING FOR GAP DEBUG] dist: {min_ds:.1f}m <= safe_wait: {safe_wait_distance:.1f}m | side: {chosen_side} | offset: {lateral_offset:.2f}m | tail_v: {tail_speed_mps*3.6:.1f}km/h", flush=True)
+                                print(f"[WAITING FOR GAP DEBUG] dist: {min_ds:.1f}m <= safe_wait: {safe_wait_distance:.1f}m | tail_v: {tail_speed_mps*3.6:.1f}km/h", flush=True)
                             
                         if min_ds < dynamic_tailing_dist:
                             target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
+                            is_actively_tailing = True
                             self.get_logger().info(f"[TAILING] {'FAST' if is_fast_oppo else 'SLOW'} Oppo '{nearest_vid}' is {min_ds:.1f}m ahead. Speed: {opp_speed_kmph:.1f} km/h. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
                 else: # Inside either prep zone or strict zone
                     # Inside the zone, ONLY trigger emergency pass if opponent is practically crashed.
@@ -1822,8 +1822,22 @@ class MPCController(Node):
                     elif min_ds < dynamic_tailing_dist:
                         # Tailing inside a zone
                         target_v_max_mps = min(target_v_max_mps, tail_speed_mps)
+                        is_actively_tailing = True
                         zone_type = "STRICT ZONE" if in_strict_zone else "PREP ZONE"
                         self.get_logger().info(f"[TAILING] {zone_type} (wp={ego_wp_id}). Tailing '{nearest_vid}' at {min_ds:.1f}m. Target v_max: {target_v_max_mps*3.6:.1f} km/h.", throttle_duration_sec=1.0)
+
+                # ===============================================
+                # APPLY TAILING LATERAL OFFSET
+                # ===============================================
+                if is_actively_tailing and not self._is_launch_mode_active:
+                    chosen_side = getattr(self._reference_path, 'obstacle_choices', {}).get(nearest_vid, "NONE")
+                    if chosen_side in ["LEFT", "LEFT (smooth)", "LEFT (only valid)"]:
+                        lateral_offset = active_tailing_lateral_offset
+                    elif chosen_side in ["RIGHT", "RIGHT (smooth)", "RIGHT (only valid)"]:
+                        lateral_offset = -active_tailing_lateral_offset
+                        
+                    if self._loop % (self._mpc_cfg.control_rate // 2) == 0:
+                        print(f"[TAILING OFFSET] side: {chosen_side} | offset: {lateral_offset:.2f}m", flush=True)
 
         if getattr(self, '_prev_launch_mode_active', False) and not self._is_launch_mode_active:
             self.get_logger().info("[LAUNCH MODE] Overtaking maneuver finished. Returning to normal steer gain.", throttle_duration_sec=2.0)
@@ -1876,7 +1890,7 @@ class MPCController(Node):
 
         # === MPC SOLVER ===
         with self._stats.time_block("control"):
-            dynamic_obs = self._dynamic_obstacles if (self.USE_OBSTACLE_AVOIDANCE and is_overtaking_active) else []
+            dynamic_obs = self._dynamic_obstacles if (self.USE_OBSTACLE_AVOIDANCE and getattr(self, '_v2x_avoidance_active', False)) else []
             launch_n_arg = getattr(self, '_current_launch_N', None) if is_overtaking_active else None
             u, max_delta = self._mpc.get_control(dynamic_obstacles=dynamic_obs, launch_N=launch_n_arg, lateral_offset=lateral_offset)
 

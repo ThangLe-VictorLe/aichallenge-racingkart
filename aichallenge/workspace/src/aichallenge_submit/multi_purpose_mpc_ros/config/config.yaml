@@ -118,8 +118,8 @@ v2x_obstacle_avoidance:
   # opponent kart is detected AHEAD of us within this along-raceline distance.
   # Hysteresis: activate at activation_distance_m, deactivate at deactivation_distance_m.
   # Set activation_distance_m: 0.0 to fully disable, or a large value to always activate.
-  activation_distance_m: 20.0   # [m] turn ON avoidance when opponent closer than this
-  deactivation_distance_m: 25.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
+  activation_distance_m: 25.0   # [m] turn ON avoidance when opponent closer than this
+  deactivation_distance_m: 30.0 # [m] turn OFF avoidance when opponent farther than this (hysteresis)
 
   # --- Tailing & Overtaking Strategy ---
   tailing_distance_m: 12.0      # [m] distance to start matching opponent's speed
@@ -143,20 +143,21 @@ v2x_obstacle_avoidance:
     overtake_N: 10                 # MPC prediction horizon (N) during active launch mode
     no_overtake_zones: [] # Block straights here to prevent overtaking fast opponents on straights!
     #[190.0,200.0]
-    corridor_bias: [[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"]]
+    corridor_bias: [[55.0,70.0, "RIGHT"],[105.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"]]
 
   slow_opponent:                   # Work for npc, slow karts
-    tailing_speed_gain: 0.5
+    tailing_distance_m: 25.0       # [m] distance to start tailing logic and lateral offset earlier
+    tailing_speed_gain: 0.5        # 0.3
     tailing_speed_min_delta: 0.5
     tailing_speed_safe_delta: 0.2  # [m/s] safe delta when waiting closely for a gap
     tailing_lateral_offset: 0.7    # [m] lateral offset to explicitly slide to the chosen side while waiting
-    launch_safe_width: 0.2         # [m] required corridor width to trigger launch
-    min_overtaking_steer_gain: [[10.0, 1.8], [25.0, 1.4]] # Dynamic gain: 1.8 at slow speeds, decaying to 1.0 at high speeds
-    launch_n: 30                   # For sooner lane change, Dictates the Launch Distance (large N = launch earlier from further away)
-    overtake_N: 14                 # MPC prediction horizon (N) during active launch mode
+    launch_safe_width: 0.3         # [m]. 0.35. required corridor width to trigger launch (increased to prevent clipping)
+    min_overtaking_steer_gain: [[10.0, 2.2], [25.0, 1.6]] # Dynamic gain: Increased to steer sharper during low speed passes
+    launch_n: 20                   # For sooner lane change, Dictates the Launch Distance (large N = launch earlier from further away)
+    overtake_N: 14                 # MPC prediction horizon (N) massively increased to see further ahead and plan a wider avoidance curve
     no_overtake_zones: [] # Fewer zones, slow cars are safe to pass anywhere else
     #[150.0,160.0]
-    corridor_bias: [[0.0,55.0, "RIGHT"],[60.0,70.0, "RIGHT"],[110.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"],[270.0, 295.0,"RIGHT"]]
+    corridor_bias: [[0.0,55.0, "RIGHT"],[55.0,70.0, "RIGHT"],[105.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"],[270.0, 295.0,"RIGHT"]]
     #
 recovery:
   enable: true

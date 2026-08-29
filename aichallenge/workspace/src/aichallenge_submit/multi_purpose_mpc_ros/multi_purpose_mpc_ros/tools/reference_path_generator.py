@@ -12,7 +12,7 @@ from multi_purpose_mpc_ros.core.reference_path import ReferencePath
 from multi_purpose_mpc_ros.core.utils import load_waypoints, load_ref_path
 
 # Project
-from multi_purpose_mpc_ros.common import convert_to_namedtuple, file_exists
+from multi_purpose_mpc_ros.common import convert_to_namedtuple, file_exists, read_config_file
 
 
 class ReferencePathGenerator():
@@ -29,8 +29,8 @@ class ReferencePathGenerator():
 
     @classmethod
     def __load_config(cls, config_path: str) -> NamedTuple:
-        with open(config_path, "r") as f:
-            cfg: NamedTuple = convert_to_namedtuple(yaml.safe_load(f))
+        config_content = read_config_file(config_path)
+        cfg: NamedTuple = convert_to_namedtuple(yaml.safe_load(config_content))
 
         # Check if the files exist
         mandatory_files = [cfg.map.yaml_path, cfg.waypoints.csv_path]

@@ -835,6 +835,9 @@ class ReferencePath:
                 del self.obstacle_choices[vid]
                 del self.obstacle_choices_time[vid]
                 del self.obstacle_choices_wp[vid]
+                
+        # (Logic to explicitly erase memory on bias zone exit was removed so memory naturally expires)
+
 
         # container for constraints and border cells
         ub_hor = []
@@ -881,6 +884,10 @@ class ReferencePath:
                     if hasattr(future_obs, 'strategy') and future_obs.strategy in ["LEFT", "RIGHT"]:
                         force_side = future_obs.strategy
                         
+                    # If no strategy forces it, rely on our memory first to prevent zig-zagging
+                    if force_side is None and vid in self.obstacle_choices:
+                        force_side = self.obstacle_choices[vid]
+
                     # Apply track strategy map (corridor bias) if no side is forced yet
                     if force_side is None and self.corridor_bias:
                         curr_wp_id = wp_idx % self.n_waypoints
@@ -888,10 +895,6 @@ class ReferencePath:
                             if bias_start <= curr_wp_id <= bias_end:
                                 force_side = bias_side
                                 break
-                                
-                    # If no strategy or bias forces it, rely on our memory
-                    if force_side is None and vid in self.obstacle_choices:
-                        force_side = self.obstacle_choices[vid]
                     
                     chosen_side = "NONE"
                     if force_side is not None:

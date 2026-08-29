@@ -20,6 +20,7 @@ from std_msgs.msg import ColorRGBA
 
 # Multi_Purpose_MPC
 from multi_purpose_mpc_ros.tools.reference_path_generator import ReferencePathGenerator
+from multi_purpose_mpc_ros.common import read_config_file
 
 RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
 YELLOW = ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
@@ -51,8 +52,8 @@ class ReferenceVelocityConfigulator():
 
     @classmethod
     def _load_config(cls, config_path: str) -> Dict:
-        with open(config_path, "r") as f:
-            cfg: Dict = yaml.safe_load(f) # type: ignore
+        config_content = read_config_file(config_path)
+        cfg: Dict = yaml.safe_load(config_content) # type: ignore
         return cfg["ref_vel_configulator"]
 
     def _register_params(self):
