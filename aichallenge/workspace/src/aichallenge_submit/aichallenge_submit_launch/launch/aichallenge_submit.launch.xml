@@ -27,4 +27,7 @@
     <param name="grad_mid_speed" value="20.0"/>
     <param name="grad_max_speed" value="40.0"/>
   </node>
+  
+  <!-- Auto GNSS Initializer -->
+  <node pkg="multi_purpose_mpc_ros" exec="publish_initialpose_gnss" name="publish_initialpose_gnss" output="screen" />
 </launch>

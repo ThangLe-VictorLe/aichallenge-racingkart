@@ -128,7 +128,7 @@ class MPC:
         self.max_steering_rate = max_steering_rate
 
 
-    def _init_problem(self, N, umin, umax, safety_margin, dynamic_obstacles=None, launch_N=None, lateral_offset=0.0):
+    def _init_problem(self, N, umin, umax, safety_margin, dynamic_obstacles=None, launch_N=None, lateral_offset=0.0, nearest_vid=None):
         import time
         t_start = time.time()
         
@@ -153,12 +153,21 @@ class MPC:
         kappa_ref_list = []
         delta_s_list = []
 
+        # Predict realistic velocity profile from current state
+        sim_v = max(self.current_control[0], 1.0)
+        
         for n in range(N):
             current_waypoint = self.model.reference_path.get_waypoint(self.model.wp_id + n)
             next_waypoint = self.model.reference_path.get_waypoint(self.model.wp_id + n + 1)
-            v_ref_list.append(np.clip(current_waypoint.v_ref, umin[0], umax[0]))
+            delta_s = next_waypoint - current_waypoint
+            
+            # Kart accelerates at roughly 3.0 m/s^2.
+            # dv = a * dt = a * (ds / v)
+            sim_v = min(sim_v + 3.0 * (delta_s / sim_v), current_waypoint.v_ref)
+            
+            v_ref_list.append(np.clip(sim_v, umin[0], umax[0]))
             kappa_ref_list.append(current_waypoint.kappa)
-            delta_s_list.append(next_waypoint - current_waypoint)
+            delta_s_list.append(delta_s)
         
         f_arr, A_arr, B_arr = self.model.linearize_vectorized(
             np.array(v_ref_list), np.array(kappa_ref_list), np.array(delta_s_list)
@@ -193,7 +202,7 @@ class MPC:
             ub, lb, _ = self.model.reference_path.update_path_constraints(
                 offset_wp_id + 1,
                 [self.model.temporal_state.x, self.model.temporal_state.y, self.model.temporal_state.psi],
-                N, self.model.length, self.model.width, safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N)
+                N, self.model.length, self.model.width, safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, nearest_vid=nearest_vid)
         else:
             ref_wp_id = (offset_wp_id + 1) % len(self.model.reference_path.path_constraints[0])
             ub = self.model.reference_path.path_constraints[0][ref_wp_id]
@@ -216,6 +225,19 @@ class MPC:
 
         # Update dynamic state constraints
         xmin_dyn[0] = xmax_dyn[0] = self.model.spatial_state.e_y
+        
+        # FUNNEL LOGIC: Ensure bounds are physically reachable from current position
+        # Maximum lateral shift per prediction step (tuning parameter)
+        max_dy_per_step = 0.5 
+        reachable_lb = self.model.spatial_state.e_y
+        reachable_ub = self.model.spatial_state.e_y
+        for n in range(N):
+            reachable_lb -= max_dy_per_step
+            reachable_ub += max_dy_per_step
+            # Relax the bounds if they are tighter than what the kart can physically reach
+            lb[n] = min(lb[n], reachable_ub)
+            ub[n] = max(ub[n], reachable_lb)
+            
         xmin_dyn[self.nx::self.nx] = lb
         xmax_dyn[self.nx::self.nx] = ub
         
@@ -252,9 +274,14 @@ class MPC:
 
         # ステアリングレート制約の境界
         n_rate_constraints = N - 1
-        max_delta_change = self.max_steering_rate * self.model.Ts
-        lineq_rate = -max_delta_change * np.ones(n_rate_constraints)
-        uineq_rate = max_delta_change * np.ones(n_rate_constraints)
+        lineq_rate = np.zeros(n_rate_constraints)
+        uineq_rate = np.zeros(n_rate_constraints)
+        for i in range(n_rate_constraints):
+            v_i = max(v_ref_list[i], 1.0)
+            dt_i = delta_s_list[i] / v_i
+            max_delta_change = self.max_steering_rate * dt_i
+            lineq_rate[i] = -max_delta_change
+            uineq_rate[i] = max_delta_change
 
         # 全ての境界を結合
         l = np.hstack([leq, lineq_basic, lineq_rate])
@@ -280,7 +307,7 @@ class MPC:
         t_setup_end = time.time()
         return P, q, A_full, l, u
 
-    def get_control(self, dynamic_obstacles=None, launch_N=None, lateral_offset=0.0) -> Tuple[np.ndarray, float]:
+    def get_control(self, dynamic_obstacles=None, launch_N=None, lateral_offset=0.0, nearest_vid=None) -> Tuple[np.ndarray, float]:
         """
         Get control signal given the current position of the car.
         """
@@ -301,7 +328,7 @@ class MPC:
         t_t2s_end = time.time()
 
         t_init_start = time.time()
-        P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], self.model.safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, lateral_offset=lateral_offset)
+        P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], self.model.safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, lateral_offset=lateral_offset, nearest_vid=nearest_vid)
         t_init_end = time.time()
 
 
@@ -317,7 +344,7 @@ class MPC:
             if not np.all(use_control_signals):
                 for i in range(1, 6):
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
-                    self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], relaxed_safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, lateral_offset=lateral_offset)
+                    P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], relaxed_safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, lateral_offset=lateral_offset, nearest_vid=nearest_vid)
                     dec = self.optimizer.solve()
                     control_signals = np.array(dec.x[-N*nu:])
                     use_control_signals = control_signals[1::2]

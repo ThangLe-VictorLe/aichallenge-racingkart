@@ -12,3 +12,5 @@ Stucture:
 -rviz panel: aichallenge/workspace/src/aichallenge_system/autoware_overlay_rviz_plugin
 
 - whenever add a new variable, remember to initialize them at mpc_controller.py
+
+- Please make less guess, focus on print command and testing for debugging

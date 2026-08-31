@@ -90,119 +90,119 @@ ref_vel_configulator:
     ref_vel: 36.0
     wp_id: 145
   s30:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 150
   s31:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 155
   s32:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 160
   s33:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 165
   s34:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 170
   s35:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 175
   s36:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 180
   s37:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 185
   s38:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 190
   s39:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 195
   s40:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 200
   s41:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 205
   s42:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 210
   s43:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 215
   s44:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 220
   s45:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 225
   s46:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 230
   s47:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 235
   s48:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 240
   s49:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 245
   s50:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 250
   s51:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 255
   s52:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 260
   s53:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 265
   s54:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 270
   s55:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 275
   s56:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 280
   s57:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 285
   s58:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 290
   s59:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 295
   s60:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 300
   s61:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 305
   s62:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 310
   s63:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 315
   s64:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 320
   s65:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 325
   s66:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 330
   s67:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 335
   s68:
-    ref_vel: 29.0
+    ref_vel: 36.0
     wp_id: 340

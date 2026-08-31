@@ -23,7 +23,7 @@ reference_path:
   update_by_topic: false # When true, 'circle' must be false
   # path from pkg share dir
   # csv_path: ""
-  csv_path: "env/final_ver3/traj_optimized_traj_mincurv_edited.csv"
+  csv_path: "env/preliminary/optimized_traj_mincurv.csv"
   resolution: 0.6
   smoothing_distance: 2
   max_width: 6.0
@@ -36,12 +36,12 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.35   # artificially squeezed to force strict tracking
+  width: 1.4   # artificially squeezed to force strict tracking
 
 mpc:
   use_csv_velocity: false
   use_dynamic_steer_gain: true
-  N: 18
+  N: 30
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
@@ -51,7 +51,7 @@ mpc:
   delta_max_deg: 32.0 # degrees
   steer_rate_max: 1.5 # rad/s
   control_rate: 40.0 # Hz
-  steering_tire_angle_gain_var: 1.6
+  steering_tire_angle_gain_var: 1.0
   # steering_tire_angle_gain_var: 1.0
   # accel_low_pass_gain: 0.1
   # steer_low_pass_gain: 0.3
@@ -66,7 +66,7 @@ mpc:
 
   v_max: 36.0   # km/h
   ay_max: 22.0 # m/s^2, maximum lateral acceleration in curves
-  Q: [500000.0, 80000000.0, 2000000.0]
+  Q: [1000000.0, 90000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##
@@ -143,25 +143,25 @@ v2x_obstacle_avoidance:
     overtake_N: 10                 # MPC prediction horizon (N) during active launch mode
     no_overtake_zones: [] # Block straights here to prevent overtaking fast opponents on straights!
     #[190.0,200.0]
-    corridor_bias: [[55.0,70.0, "RIGHT"],[105.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"]]
+    corridor_bias: [[50.0,70.0, "RIGHT"],[105.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"]]
 
   slow_opponent:                   # Work for npc, slow karts
     tailing_distance_m: 25.0       # [m] distance to start tailing logic and lateral offset earlier
     tailing_speed_gain: 0.5        # 0.3
     tailing_speed_min_delta: 0.5
-    tailing_speed_safe_delta: 0.2  # [m/s] safe delta when waiting closely for a gap
+    tailing_speed_safe_delta: 0.2  # [m/s] 0.2. safe delta when waiting closely for a gap
     tailing_lateral_offset: 0.7    # [m] lateral offset to explicitly slide to the chosen side while waiting
-    launch_safe_width: 0.3         # [m]. 0.35. required corridor width to trigger launch (increased to prevent clipping)
+    launch_safe_width: 0.2         # [m]. 0.35. required corridor width to trigger launch (increased to prevent clipping)
     min_overtaking_steer_gain: [[10.0, 2.2], [25.0, 1.6]] # Dynamic gain: Increased to steer sharper during low speed passes
     launch_n: 20                   # For sooner lane change, Dictates the Launch Distance (large N = launch earlier from further away)
-    overtake_N: 14                 # MPC prediction horizon (N) massively increased to see further ahead and plan a wider avoidance curve
+    overtake_N: 16                 # MPC prediction horizon (N) massively increased to see further ahead and plan a wider avoidance curve
     no_overtake_zones: [] # Fewer zones, slow cars are safe to pass anywhere else
     #[150.0,160.0]
-    corridor_bias: [[0.0,55.0, "RIGHT"],[55.0,70.0, "RIGHT"],[105.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"],[270.0, 295.0,"RIGHT"]]
+    corridor_bias: [[0.0,55.0, "RIGHT"],[55.0,70.0, "RIGHT"],[105.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"]] # ,[270.0, 295.0,"RIGHT"]
     #
 recovery:
   enable: true
-  stuck_vel_threshold_kmh: 0.2   # [km/h] threshold to consider vehicle stuck
+  stuck_vel_threshold_kmh: 0.3   # [km/h] threshold to consider vehicle stuck
   stuck_time_sec: 1.0            # [s] seconds stuck before triggering recovery
   reverse_vel_kmh: -5.0          # [km/h] speed when reversing out
   reverse_time_sec: 2.0          # [s] duration to reverse

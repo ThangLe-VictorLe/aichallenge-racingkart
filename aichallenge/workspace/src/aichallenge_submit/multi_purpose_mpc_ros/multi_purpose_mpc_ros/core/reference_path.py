@@ -814,7 +814,7 @@ class ReferencePath:
 
         return np.array(upper_bounds), np.array(lower_bounds)
 
-    def update_path_constraints(self, wp_id, pose, N, model_length, model_width, safety_margin, dynamic_obstacles=None, launch_N=None):
+    def update_path_constraints(self, wp_id, pose, N, model_length, model_width, safety_margin, dynamic_obstacles=None, launch_N=None, nearest_vid=None):
         if not hasattr(self, 'start_time'):
             self.start_time = time.time()
         current_time = time.time()
@@ -855,6 +855,9 @@ class ReferencePath:
                     obs_by_vid.setdefault(obs.vid, []).append(obs)
             
             for vid, obs_list in obs_by_vid.items():
+                if nearest_vid is not None and vid != nearest_vid:
+                    continue
+                
                 future_obs = obs_list[-1]
                 wp_idx = getattr(future_obs, 'nearest_wp_id', None)
                 if wp_idx is not None:
@@ -902,8 +905,9 @@ class ReferencePath:
                         # Artificially guarantee at least 0.5m width so mpc_controller.py's `space_is_wide_enough` 
                         # triggers LAUNCH MODE instead of falling back to WAITING FOR GAP. 
                         # We trust the strategy that the gap WILL open up!
-                        actual_w = W_left_f if "LEFT" in force_side else W_right_f
-                        self.last_W_chosen = max(0.5, actual_w)
+                        # We strictly trust the strategy! If it's too narrow, the width will be small,
+                        # triggering WAITING FOR GAP in mpc_controller.py.
+                        pass # self.last_W_chosen is now calculated in the N-loop below
                     else:
                         if valid_right_f and valid_left_f:
                             if W_left_f > W_right_f + 0.2:
@@ -933,7 +937,14 @@ class ReferencePath:
                             self.obstacle_choices_wp[vid] = wp_id
                     
                     if chosen_side != "NONE" and should_print_corridor:
-                        print(f"[FUTURE-CORRIDOR] vid: {vid} | Future wp_id: {wp_idx} | Chosen: {chosen_side} | W_left: {W_left_f:.2f}m, W_right: {W_right_f:.2f}m", flush=True)
+                        if not hasattr(self, '_last_print_time_f'):
+                            self._last_print_time_f = {}
+                        if current_time - self._last_print_time_f.get(vid, 0.0) > 0.25:
+                            print(f"[FUTURE-CORRIDOR] vid: {vid} | Future wp_id: {wp_idx} | Chosen: {chosen_side} | W_left: {W_left_f:.2f}m, W_right: {W_right_f:.2f}m", flush=True)
+                            self._last_print_time_f[vid] = current_time
+                            
+        min_W_horizon = 999.0
+        
         for n in range(N):
             wp = self.get_waypoint(wp_id + n)
             
@@ -995,25 +1006,19 @@ class ReferencePath:
 
                         if force_side is not None:
                             if "LEFT" in force_side:
-                                if valid_left:
-                                    lb_sm, ub_sm = I_left
-                                    chosen_side = force_side
-                                elif valid_right:
+                                if not valid_left and valid_right:
                                     lb_sm, ub_sm = I_right
                                     chosen_side = "RIGHT (fallback)"
                                 else:
-                                    lb_sm, ub_sm = 0.0, 0.0
-                                    chosen_side = "INFEASIBLE"
-                            else: # RIGHT
-                                if valid_right:
-                                    lb_sm, ub_sm = I_right
+                                    lb_sm, ub_sm = I_left
                                     chosen_side = force_side
-                                elif valid_left:
+                            else: # RIGHT
+                                if not valid_right and valid_left:
                                     lb_sm, ub_sm = I_left
                                     chosen_side = "LEFT (fallback)"
                                 else:
-                                    lb_sm, ub_sm = 0.0, 0.0
-                                    chosen_side = "INFEASIBLE"
+                                    lb_sm, ub_sm = I_right
+                                    chosen_side = force_side
                         else:
                             if valid_right and valid_left:
                                 C_right = (I_right[0] + I_right[1]) / 2.0
@@ -1053,11 +1058,20 @@ class ReferencePath:
                                     self.obstacle_choices_wp[obs.vid] = wp_id
                         
                         if chosen_side != "NONE" and should_print_corridor:
-                            print(f"[TAILING-CORRIDOR] vid: {getattr(obs, 'vid', 'N/A')} | ego_wp: {wp_id} | wp_id: {wp_id + n} | Chosen: {chosen_side} | W_left: {W_left:.2f}m, W_right: {W_right:.2f}m", flush=True)
+                            vid_str = getattr(obs, 'vid', 'N/A')
+                            if not hasattr(self, '_last_print_time_t'):
+                                self._last_print_time_t = {}
+                            if current_time - self._last_print_time_t.get(vid_str, 0.0) > 0.5:
+                                print(f"[TAILING-CORRIDOR] vid: {vid_str} | ego_wp: {wp_id} | wp_id: {wp_id + n} | Chosen: {chosen_side} | W_left: {W_left:.2f}m, W_right: {W_right:.2f}m", flush=True)
+                                self._last_print_time_t[vid_str] = current_time
             
             if ub_sm < lb_sm:
                 ub_sm = 0.0
                 lb_sm = 0.0
+
+            W_sm = ub_sm - lb_sm
+            if W_sm < min_W_horizon:
+                min_W_horizon = W_sm
 
             C_prev = (ub_sm + lb_sm) / 2.0
 
@@ -1090,7 +1104,105 @@ class ReferencePath:
             wp.ub_sm = ub_sm
             wp.lb_sm = lb_sm
 
+        self.last_W_chosen = min_W_horizon
+
         return np.array(ub_hor), np.array(lb_hor), border_cells_hor_sm
+
+    def check_corridor_width(self, wp_id, N, safety_margin, dynamic_obstacles=None, min_segment_length=0.1):
+        """
+        Simulate the N-step horizon path constraint calculation to find the true bottleneck 
+        width of the corridor, without permanently altering the reference path constraints.
+        Returns the minimum width (float) across the entire simulated horizon.
+        """
+        if dynamic_obstacles is None or len(dynamic_obstacles) == 0:
+            return 6.0  # safe fallback if no obstacles
+
+        min_W_horizon = 999.0
+        
+        for n in range(N):
+            wp = self.get_waypoint(wp_id + n)
+            
+            # Static bounds minus safety margin
+            ub_sm = wp.ub - safety_margin
+            lb_sm = wp.lb + safety_margin
+
+            if ub_sm < lb_sm:
+                ub_sm = 0.0
+                lb_sm = 0.0
+
+            for obs in dynamic_obstacles:
+                dx = obs.cx - wp.x
+                dy = obs.cy - wp.y
+                
+                s_dist_proj = dx * np.cos(wp.psi) + dy * np.sin(wp.psi)
+                d_dist = -dx * np.sin(wp.psi) + dy * np.cos(wp.psi)
+                R_eff = obs.radius + safety_margin
+                
+                if hasattr(wp, 's') and hasattr(obs, 's') and obs.s is not None:
+                    s_dist = wp.s - obs.s
+                    if self.circular:
+                        s_dist = (s_dist + self.length / 2) % self.length - self.length / 2
+                else:
+                    s_dist = s_dist_proj
+                
+                if abs(s_dist) < R_eff:
+                    w = np.sqrt(R_eff**2 - s_dist**2)
+                    I_right = [lb_sm, min(ub_sm, d_dist - w)]
+                    I_left = [max(lb_sm, d_dist + w), ub_sm]
+                    W_right = I_right[1] - I_right[0]
+                    W_left = I_left[1] - I_left[0]
+                    valid_right = W_right >= min_segment_length
+                    valid_left = W_left >= min_segment_length
+                    
+                    force_side = None
+                    if getattr(obs, 'vid', None) is not None:
+                        force_side = self.obstacle_choices.get(obs.vid)
+                        
+                    if force_side is None and self.corridor_bias:
+                        curr_wp_id = (wp_id + n) % self.n_waypoints
+                        for bias_start, bias_end, bias_side in self.corridor_bias:
+                            if bias_start <= curr_wp_id <= bias_end:
+                                force_side = bias_side
+                                break
+
+                    if force_side is not None:
+                        if "LEFT" in force_side:
+                            if not valid_left and valid_right:
+                                lb_sm, ub_sm = I_right
+                            else:
+                                lb_sm, ub_sm = I_left
+                        else: # RIGHT
+                            if not valid_right and valid_left:
+                                lb_sm, ub_sm = I_left
+                            else:
+                                lb_sm, ub_sm = I_right
+                    else:
+                        if valid_right and valid_left:
+                            if W_left > W_right:
+                                lb_sm, ub_sm = I_left
+                            else:
+                                lb_sm, ub_sm = I_right
+                        elif valid_right:
+                            lb_sm, ub_sm = I_right
+                        elif valid_left:
+                            lb_sm, ub_sm = I_left
+                        else:
+                            lb_sm, ub_sm = 0.0, 0.0
+
+            if ub_sm < lb_sm:
+                ub_sm = 0.0
+                lb_sm = 0.0
+
+            W_sm = ub_sm - lb_sm
+            if W_sm < min_W_horizon:
+                min_W_horizon = W_sm
+                
+            # Early exit if perfectly blocked
+            if min_W_horizon <= 0.0:
+                return 0.0
+
+        return float(min_W_horizon)
+
 
 if __name__ == '__main__':
 
