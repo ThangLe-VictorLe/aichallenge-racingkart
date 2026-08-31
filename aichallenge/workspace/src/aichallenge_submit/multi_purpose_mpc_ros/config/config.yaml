@@ -45,7 +45,7 @@ mpc:
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [100000.0, 100000.0]
+  R: [100000.0, 300000.0]
   a_min: -11.505 # m/s^2
   a_max: 3.0 # m/s^2
   delta_max_deg: 32.0 # degrees
@@ -66,7 +66,7 @@ mpc:
 
   v_max: 36.0   # km/h
   ay_max: 22.0 # m/s^2, maximum lateral acceleration in curves
-  Q: [1000000.0, 90000000.0, 2000000.0]
+  Q: [0.0, 80000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##

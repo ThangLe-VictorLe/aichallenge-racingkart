@@ -12,16 +12,16 @@ steer_gain_configurator:
     gain: 1.0
     wp_id: 15
   s4:
-    gain: 1.0
+    gain: 0.5
     wp_id: 20
   s5:
-    gain: 1.0
+    gain: 0.5
     wp_id: 25
   s6:
-    gain: 1.0
+    gain: 0.5
     wp_id: 30
   s7:
-    gain: 0.1
+    gain: 0.5
     wp_id: 35
   s8:
     gain: 0.1
@@ -60,7 +60,7 @@ steer_gain_configurator:
     gain: 1.0
     wp_id: 95
   s20:
-    gain: 1.0
+    gain: 1.2
     wp_id: 100
   s21:
     gain: 1.0
@@ -90,10 +90,10 @@ steer_gain_configurator:
     gain: 1.0
     wp_id: 145
   s30:
-    gain: 1.0
+    gain: 1.2
     wp_id: 150
   s31:
-    gain: 1.0
+    gain: 1.2
     wp_id: 155
   s32:
     gain: 1.0
@@ -117,7 +117,7 @@ steer_gain_configurator:
     gain: 1.0
     wp_id: 190
   s39:
-    gain: 1.0
+    gain: 1.4
     wp_id: 195
   s40:
     gain: 1.0
@@ -126,13 +126,13 @@ steer_gain_configurator:
     gain: 1.0
     wp_id: 205
   s42:
-    gain: 1.0
+    gain: 1.2
     wp_id: 210
   s43:
-    gain: 1.0
+    gain: 1.2
     wp_id: 215
   s44:
-    gain: 1.0
+    gain: 1.2
     wp_id: 220
   s45:
     gain: 1.0
@@ -150,37 +150,37 @@ steer_gain_configurator:
     gain: 1.0
     wp_id: 245
   s50:
-    gain: 1.0
+    gain: 0.6
     wp_id: 250
   s51:
-    gain: 1.0
+    gain: 1.2
     wp_id: 255
   s52:
-    gain: 1.0
+    gain: 1.2
     wp_id: 260
   s53:
-    gain: 1.0
+    gain: 0.6
     wp_id: 265
   s54:
-    gain: 1.0
+    gain: 1.2
     wp_id: 270
   s55:
-    gain: 1.0
+    gain: 0.6
     wp_id: 275
   s56:
-    gain: 1.0
+    gain: 0.6
     wp_id: 280
   s57:
-    gain: 1.0
+    gain: 0.6
     wp_id: 285
   s58:
-    gain: 1.0
+    gain: 0.6
     wp_id: 290
   s59:
     gain: 1.0
     wp_id: 295
   s60:
-    gain: 1.0
+    gain: 1.2
     wp_id: 300
   s61:
     gain: 1.0
