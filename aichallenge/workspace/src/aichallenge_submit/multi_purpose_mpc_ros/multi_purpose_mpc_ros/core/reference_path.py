@@ -728,7 +728,7 @@ class ReferencePath:
 
         return free_segments
 
-    def update_simple_path_constraints(self, N, safety_margin):
+    def update_simple_path_constraints(self, N, static_safety_margin=0.3):
         upper_bounds = []
         lower_bounds = []
         dynamic_upper_bounds = []
@@ -739,8 +739,8 @@ class ReferencePath:
                 wp = self.get_waypoint(wp_id+n)
 
                 # Subtract safety margin
-                ub_sm = wp.ub - safety_margin
-                lb_sm = wp.lb + safety_margin
+                ub_sm = wp.ub - static_safety_margin
+                lb_sm = wp.lb + static_safety_margin
 
                 # Check feasibility of the path after subtracting safety margin
                 if ub_sm < lb_sm:
@@ -771,7 +771,7 @@ class ReferencePath:
         self.set_border_cells(
             dynamic_upper_bounds, dynamic_lower_bounds, self.n_waypoints - 1, N)
 
-    def update_simple_path_constraints_horizon(self, wp_id, N, safety_margin):
+    def update_simple_path_constraints_horizon(self, wp_id, N, static_safety_margin=0.3):
         # container for constraints and border cells
         upper_bounds = []
         lower_bounds = []
@@ -783,8 +783,8 @@ class ReferencePath:
             wp = self.get_waypoint(wp_id+n)
 
             # Subtract safety margin
-            ub_sm = wp.ub - safety_margin
-            lb_sm = wp.lb + safety_margin
+            ub_sm = wp.ub - static_safety_margin
+            lb_sm = wp.lb + static_safety_margin
 
             # Check feasibility of the path after subtracting safety margin
             if ub_sm < lb_sm:
@@ -814,7 +814,7 @@ class ReferencePath:
 
         return np.array(upper_bounds), np.array(lower_bounds)
 
-    def update_path_constraints(self, wp_id, pose, N, model_length, model_width, safety_margin, dynamic_obstacles=None, launch_N=None, nearest_vid=None):
+    def update_path_constraints(self, wp_id, pose, N, model_length, model_width, safety_margin, static_safety_margin=0.3, dynamic_obstacles=None, launch_N=None, nearest_vid=None):
         if not hasattr(self, 'start_time'):
             self.start_time = time.time()
         current_time = time.time()
@@ -867,8 +867,8 @@ class ReferencePath:
                     d_dist = -dx * np.sin(f_wp.psi) + dy * np.cos(f_wp.psi)
                     R_eff = future_obs.radius + safety_margin
                     
-                    ub_sm_f = f_wp.ub - safety_margin
-                    lb_sm_f = f_wp.lb + safety_margin
+                    ub_sm_f = f_wp.ub - static_safety_margin
+                    lb_sm_f = f_wp.lb + static_safety_margin
                     if ub_sm_f < lb_sm_f:
                         ub_sm_f = 0.0
                         lb_sm_f = 0.0
@@ -882,22 +882,28 @@ class ReferencePath:
                     
                     valid_right_f = W_right_f >= min_segment_length
                     valid_left_f = W_left_f >= min_segment_length
-                    
                     force_side = None
-                    if hasattr(future_obs, 'strategy') and future_obs.strategy in ["LEFT", "RIGHT"]:
-                        force_side = future_obs.strategy
-                        
-                    # If no strategy forces it, rely on our memory first to prevent zig-zagging
-                    if force_side is None and vid in self.obstacle_choices:
-                        force_side = self.obstacle_choices[vid]
-
-                    # Apply track strategy map (corridor bias) if no side is forced yet
-                    if force_side is None and self.corridor_bias:
-                        curr_wp_id = wp_idx % self.n_waypoints
-                        for bias_start, bias_end, bias_side in self.corridor_bias:
-                            if bias_start <= curr_wp_id <= bias_end:
-                                force_side = bias_side
-                                break
+                    is_forced_by_rule = False
+                    
+                    ignore_strategy = getattr(future_obs, 'ignore_strategy', False)
+                    
+                    if not ignore_strategy:
+                        if hasattr(future_obs, 'strategy') and future_obs.strategy in ["LEFT", "RIGHT"]:
+                            force_side = future_obs.strategy
+                            is_forced_by_rule = True
+                            
+                        # Apply track strategy map (corridor bias) first to force track-specific decisions
+                        if force_side is None and self.corridor_bias:
+                            curr_wp_id = wp_idx % self.n_waypoints
+                            for bias_start, bias_end, bias_side in self.corridor_bias:
+                                if bias_start <= curr_wp_id <= bias_end:
+                                    force_side = bias_side
+                                    is_forced_by_rule = True
+                                    break
+                                    
+                        # If no strategy or track bias forces it, rely on our memory to prevent zig-zagging
+                        if force_side is None and vid in self.obstacle_choices:
+                            force_side = self.obstacle_choices[vid]
                     
                     chosen_side = "NONE"
                     if force_side is not None:
@@ -931,10 +937,11 @@ class ReferencePath:
                     
                     if chosen_side not in ["NONE", "INFEASIBLE"]:
                         clean_side = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
-                        if vid not in self.obstacle_choices or self.obstacle_choices[vid] != clean_side:
-                            self.obstacle_choices[vid] = clean_side
-                            self.obstacle_choices_time[vid] = current_time
-                            self.obstacle_choices_wp[vid] = wp_id
+                        if is_forced_by_rule:
+                            if vid not in self.obstacle_choices or self.obstacle_choices[vid] != clean_side:
+                                self.obstacle_choices[vid] = clean_side
+                                self.obstacle_choices_time[vid] = current_time
+                                self.obstacle_choices_wp[vid] = wp_id
                     
                     if chosen_side != "NONE" and should_print_corridor:
                         if not hasattr(self, '_last_print_time_f'):
@@ -949,8 +956,8 @@ class ReferencePath:
             wp = self.get_waypoint(wp_id + n)
             
             # Static bounds minus safety margin
-            ub_sm = wp.ub - safety_margin
-            lb_sm = wp.lb + safety_margin
+            ub_sm = wp.ub - static_safety_margin
+            lb_sm = wp.lb + static_safety_margin
 
             if ub_sm < lb_sm:
                 ub_sm = 0.0
@@ -992,17 +999,22 @@ class ReferencePath:
                         
                         chosen_side = "NONE"
                         force_side = None
+                        is_forced_by_rule = False
                         
-                        if getattr(obs, 'vid', None) is not None:
-                            force_side = self.obstacle_choices.get(obs.vid)
+                        ignore_strategy = getattr(obs, 'ignore_strategy', False)
                         
-                        # Apply track strategy map (corridor bias) if no side is forced yet
-                        if force_side is None and self.corridor_bias:
-                            curr_wp_id = (wp_id + n) % self.n_waypoints
-                            for bias_start, bias_end, bias_side in self.corridor_bias:
-                                if bias_start <= curr_wp_id <= bias_end:
-                                    force_side = bias_side
-                                    break
+                        if not ignore_strategy:
+                            # Apply track strategy map (corridor bias) first
+                            if force_side is None and self.corridor_bias:
+                                curr_wp_id = (wp_id + n) % self.n_waypoints
+                                for bias_start, bias_end, bias_side in self.corridor_bias:
+                                    if bias_start <= curr_wp_id <= bias_end:
+                                        force_side = bias_side
+                                        is_forced_by_rule = True
+                                        break
+                                        
+                            if force_side is None and getattr(obs, 'vid', None) is not None:
+                                force_side = self.obstacle_choices.get(obs.vid)
 
                         if force_side is not None:
                             if "LEFT" in force_side:
@@ -1052,10 +1064,11 @@ class ReferencePath:
                                 
                             if getattr(obs, 'vid', None) is not None and chosen_side not in ["NONE", "INFEASIBLE"]:
                                 clean_side = chosen_side.replace(" (fallback)", "").replace(" (smooth)", "").replace(" (only valid)", "")
-                                if obs.vid not in self.obstacle_choices or self.obstacle_choices[obs.vid] != clean_side:
-                                    self.obstacle_choices[obs.vid] = clean_side
-                                    self.obstacle_choices_time[obs.vid] = current_time
-                                    self.obstacle_choices_wp[obs.vid] = wp_id
+                                if is_forced_by_rule:
+                                    if obs.vid not in self.obstacle_choices or self.obstacle_choices[obs.vid] != clean_side:
+                                        self.obstacle_choices[obs.vid] = clean_side
+                                        self.obstacle_choices_time[obs.vid] = current_time
+                                        self.obstacle_choices_wp[obs.vid] = wp_id
                         
                         if chosen_side != "NONE" and should_print_corridor:
                             vid_str = getattr(obs, 'vid', 'N/A')
@@ -1108,7 +1121,7 @@ class ReferencePath:
 
         return np.array(ub_hor), np.array(lb_hor), border_cells_hor_sm
 
-    def check_corridor_width(self, wp_id, N, safety_margin, dynamic_obstacles=None, min_segment_length=0.1):
+    def check_corridor_width(self, wp_id, N, safety_margin, static_safety_margin=0.3, dynamic_obstacles=None, min_segment_length=0.1):
         """
         Simulate the N-step horizon path constraint calculation to find the true bottleneck 
         width of the corridor, without permanently altering the reference path constraints.
@@ -1123,8 +1136,8 @@ class ReferencePath:
             wp = self.get_waypoint(wp_id + n)
             
             # Static bounds minus safety margin
-            ub_sm = wp.ub - safety_margin
-            lb_sm = wp.lb + safety_margin
+            ub_sm = wp.ub - static_safety_margin
+            lb_sm = wp.lb + static_safety_margin
 
             if ub_sm < lb_sm:
                 ub_sm = 0.0
@@ -1155,8 +1168,6 @@ class ReferencePath:
                     valid_left = W_left >= min_segment_length
                     
                     force_side = None
-                    if getattr(obs, 'vid', None) is not None:
-                        force_side = self.obstacle_choices.get(obs.vid)
                         
                     if force_side is None and self.corridor_bias:
                         curr_wp_id = (wp_id + n) % self.n_waypoints
@@ -1164,6 +1175,9 @@ class ReferencePath:
                             if bias_start <= curr_wp_id <= bias_end:
                                 force_side = bias_side
                                 break
+                                
+                    if force_side is None and getattr(obs, 'vid', None) is not None:
+                        force_side = self.obstacle_choices.get(obs.vid)
 
                     if force_side is not None:
                         if "LEFT" in force_side:

@@ -36,7 +36,8 @@ reference_path:
 bicycle_model:
   length: 1.087
   # width: 1.45   # real machine width
-  width: 1.4   # artificially squeezed to force strict tracking
+  width: 1.35   # artificially squeezed to force strict tracking
+  static_safety_margin: 0.9 # margin for static walls (decoupled from dynamic opponent margin)
 
 mpc:
   use_csv_velocity: false
@@ -45,7 +46,7 @@ mpc:
   # Q: [e_y, e_psi, t]
   # R: [v, delta]
   # QN: [e_y, e_psi, t]
-  R: [100000.0, 300000.0]
+  R: [100000.0, 100000.0]
   a_min: -11.505 # m/s^2
   a_max: 3.0 # m/s^2
   delta_max_deg: 32.0 # degrees
@@ -66,7 +67,7 @@ mpc:
 
   v_max: 36.0   # km/h
   ay_max: 22.0 # m/s^2, maximum lateral acceleration in curves
-  Q: [0.0, 80000000.0, 2000000.0]
+  Q: [10000.0, 80000000.0, 2000000.0]
   QN: [1000000.0, 1000000.0, 10000.0]
 
   ## --- 高速 (gnss delay 0.3) --- ##
@@ -112,6 +113,11 @@ v2x_obstacle_avoidance:
   vehicle_radius: 0.73           # [m] clearance radius around opponent kart
   v_max_safety: 30.0            # [m/s] max velocity for tracker (noise filter)
   position_jump_threshold: 5.0  # [m] max telemetry jump before velocity reset
+  
+  # --- Dynamic Squeezing ---
+  # When tailing/overtaking, we temporarily squeeze the static wall margin to allow 
+  # the MPC to find a path through tighter gaps around opponents.
+  squeezed_static_margin: 0.8   # [m] margin to static walls during avoidance
 
   # --- Proximity Gate ---
   # Obstacle avoidance (heavy path-constraint computation) only fires when an
@@ -137,8 +143,9 @@ v2x_obstacle_avoidance:
     tailing_speed_min_delta: 2.0   # [m/s] minimum relative speed during tailing (catching up)
     tailing_speed_safe_delta: 0.2  # [m/s] safe delta when waiting closely for a gap
     tailing_lateral_offset: 0.7    # [m] lateral offset to explicitly slide to the chosen side while waiting
-    launch_safe_width: 0.2         # [m] required corridor width to trigger launch
+    launch_safe_width: 0.1         # [m] required corridor width to trigger launch
     min_overtaking_steer_gain: [[20.0, 1.6], [35.0, 1.6]] # [-] dynamic min steer gain based on current speed
+    min_tailing_steer_gain: 1.0                    # [-] dynamic min steer gain applied ONLY during tailing (before launch)
     launch_n: 22                   # For sonner vel boost, Dictates the Launch Distance (small N = wait until very close to launch)
     overtake_N: 10                 # MPC prediction horizon (N) during active launch mode
     no_overtake_zones: [] # Block straights here to prevent overtaking fast opponents on straights!
@@ -151,24 +158,27 @@ v2x_obstacle_avoidance:
     tailing_speed_min_delta: 0.5
     tailing_speed_safe_delta: 0.2  # [m/s] 0.2. safe delta when waiting closely for a gap
     tailing_lateral_offset: 0.7    # [m] lateral offset to explicitly slide to the chosen side while waiting
-    launch_safe_width: 0.2         # [m]. 0.35. required corridor width to trigger launch (increased to prevent clipping)
-    min_overtaking_steer_gain: [[10.0, 2.2], [25.0, 1.6]] # Dynamic gain: Increased to steer sharper during low speed passes
+    launch_safe_width: 0.1         # [m]. 0.35. required corridor width to trigger launch (increased to prevent clipping)
+    min_overtaking_steer_gain: [[10.0, 1.2], [25.0, 1.0]] # Dynamic gain: Increased to steer sharper during low speed passes
+    min_tailing_steer_gain: 1.0                    # [-] dynamic min steer gain applied ONLY during tailing (before launch)
     launch_n: 20                   # For sooner lane change, Dictates the Launch Distance (large N = launch earlier from further away)
-    overtake_N: 16                 # MPC prediction horizon (N) massively increased to see further ahead and plan a wider avoidance curve
+    overtake_N: 20                 # MPC prediction horizon (N) massively increased to see further ahead and plan a wider avoidance curve
     no_overtake_zones: [] # Fewer zones, slow cars are safe to pass anywhere else
     #[150.0,160.0]
     corridor_bias: [[0.0,55.0, "RIGHT"],[55.0,70.0, "RIGHT"],[105.0,125.0, "LEFT"],[210.0, 225.0, "RIGHT"],[240.0, 270.0,"LEFT"]] # ,[270.0, 295.0,"RIGHT"]
     #
 recovery:
   enable: true
-  stuck_vel_threshold_kmh: 0.3   # [km/h] threshold to consider vehicle stuck
-  stuck_time_sec: 1.0            # [s] seconds stuck before triggering recovery
+  stuck_vel_threshold_kmh: 2.0   # [km/h] threshold to consider vehicle stuck
+  stuck_time_sec: 0.5            # [s] seconds stuck before triggering recovery
   reverse_vel_kmh: -5.0          # [km/h] speed when reversing out
   reverse_time_sec: 2.0          # [s] duration to reverse
   recovery_steer_gain: 2.0       # fixed steer gain override during recovery
   post_recovery_steer_gain: 2.0  # fixed steer gain override AFTER recovery (during cooldown)
-  cooldown_sec: 2.0              # [s] cooldown duration after recovery finishes
-  cooldown_Q0: 0.01        # Q[0] override during cooldown
+  cooldown_sec: 10.0              # [s] cooldown duration after recovery finishes
+  cooldown_Q: [5000000.0, 5000000.0, 2000000.0]  # Moderate Q[0] to avoid diving to apex, relaxed Q[1] (2M) to allow angling away from wall
+  cooldown_R: [100000.0, 0.0]               # R[1] down to allow large steering inputs
+  cooldown_ey_threshold: 0.05     # [m] return to normal when lateral error is small enough
   disabled_waypoints: []         # disable recovery at race start (waypoints 45 to 50)
 
 # =============================================================================

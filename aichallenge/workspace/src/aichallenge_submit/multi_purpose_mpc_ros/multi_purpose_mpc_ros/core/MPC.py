@@ -199,10 +199,11 @@ class MPC:
             umax_dyn[self.nu*n] = min(vmax_dyn, umax_dyn[self.nu*n])
 
         if self.use_obstacle_avoidance and not self.use_path_constraints_topic:
+            static_margin = getattr(self.model, 'static_safety_margin', 0.3)
             ub, lb, _ = self.model.reference_path.update_path_constraints(
                 offset_wp_id + 1,
                 [self.model.temporal_state.x, self.model.temporal_state.y, self.model.temporal_state.psi],
-                N, self.model.length, self.model.width, safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, nearest_vid=nearest_vid)
+                N, self.model.length, self.model.width, safety_margin, static_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, nearest_vid=nearest_vid)
         else:
             ref_wp_id = (offset_wp_id + 1) % len(self.model.reference_path.path_constraints[0])
             ub = self.model.reference_path.path_constraints[0][ref_wp_id]
@@ -341,7 +342,14 @@ class MPC:
             control_signals = np.array(dec.x[-N*nu:])
             use_control_signals = control_signals[1::2]
 
-            if not np.all(use_control_signals):
+            relaxation_level = 0
+            if dec.info.status != 'solved':
+                if not hasattr(self, '_infeasible_print_counter'):
+                    self._infeasible_print_counter = 0
+                    
+                if self._infeasible_print_counter % 20 == 0:
+                    print(f"[MPC] Solver failed with status '{dec.info.status}'. Relaxing safety margin...", flush=True)
+                
                 for i in range(1, 6):
                     relaxed_safety_margin = self.model.safety_margin * ((5-i) / 5.0)
                     P, q, A, l, u = self._init_problem(N, self.input_constraints['umin'], self.input_constraints['umax'], relaxed_safety_margin, dynamic_obstacles=dynamic_obstacles, launch_N=launch_N, lateral_offset=lateral_offset, nearest_vid=nearest_vid)
@@ -349,8 +357,20 @@ class MPC:
                     control_signals = np.array(dec.x[-N*nu:])
                     use_control_signals = control_signals[1::2]
 
-                    if self.infeasibility_counter == 0 and np.all(use_control_signals):
+                    if dec.info.status == 'solved':
+                        if self._infeasible_print_counter % 20 == 0:
+                            print(f"[MPC] Found relaxed solution with {(5-i)/5.0*100}% safety margin.", flush=True)
+                        relaxation_level = i
                         break
+                
+                if dec.info.status != 'solved':
+                    if self._infeasible_print_counter % 20 == 0:
+                        print(f"[MPC] STILL INFEASIBLE after full relaxation! Status: '{dec.info.status}'", flush=True)
+                    relaxation_level = 6
+                    
+                self._infeasible_print_counter += 1
+            else:
+                self._infeasible_print_counter = 0
 
             # ステア角の計算と保存
             control_signals[1::2] = np.arctan(control_signals[1::2] * self.model.length)
@@ -375,7 +395,11 @@ class MPC:
             u = np.array([v, delta])
             max_delta = np.max(np.abs(control_signals[1:len(control_signals)//3*2:2]))
 
-            self.infeasibility_counter = 0
+            # Treat heavy relaxation (<= 20% margin) or complete failure as infeasible
+            if relaxation_level >= 4:
+                self.infeasibility_counter += 1
+            else:
+                self.infeasibility_counter = 0
             self.last_solved_wp_id = self.model.wp_id
 
         except TypeError or ValueError:
